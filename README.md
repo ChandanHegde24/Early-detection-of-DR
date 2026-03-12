@@ -80,7 +80,7 @@ An AI-powered system for the early detection and severity grading of **Diabetic 
 
 ```bash
 # 1. Clone the repository
-git clone https://github.com/your-username/diabetic-retinopathy-ai.git
+git clone https://github.com/ChandnaHegde24/diabetic-retinopathy-ai.git
 cd diabetic-retinopathy-ai
 
 # 2. Create a virtual environment
