@@ -1,0 +1,70 @@
+# ==============================================================
+# Diabetic Retinopathy Early Detection — Configuration
+# ==============================================================
+
+paths:
+  raw_images: "data/raw/images"
+  raw_tabular: "data/raw/clinical_data.csv"
+  processed_images: "data/processed/images"
+  processed_tabular: "data/processed/clinical_data_clean.csv"
+  saved_models: "saved_models"
+  sample_inputs: "data/sample_inputs"
+
+image:
+  target_size: [224, 224]       # Width x Height for CNN input
+  channels: 3
+  clahe_clip_limit: 2.0
+  clahe_tile_grid: [8, 8]
+
+augmentation:
+  horizontal_flip: true
+  vertical_flip: false
+  rotation_limit: 15
+  brightness_limit: 0.2
+  contrast_limit: 0.2
+
+tabular:
+  features:
+    - age
+    - bmi
+    - hba1c
+    - blood_pressure_systolic
+    - blood_pressure_diastolic
+    - cholesterol_total
+    - cholesterol_hdl
+    - cholesterol_ldl
+    - triglycerides
+    - diabetes_duration_years
+    - smoking_status
+    - family_history_dr
+  target: "dr_grade"            # 0-4 (No DR, Mild, Moderate, Severe, Proliferative)
+  test_size: 0.2
+  random_state: 42
+
+cnn:
+  backbone: "EfficientNetB0"    # Options: ResNet50, EfficientNetB0, EfficientNetB3
+  num_classes: 5
+  learning_rate: 0.0001
+  batch_size: 32
+  epochs: 30
+  dropout_rate: 0.3
+  freeze_base: true             # Freeze backbone layers for transfer learning
+  fine_tune_at: 100             # Unfreeze layers from this index onwards
+  early_stopping_patience: 5
+
+biomarker_model:
+  type: "xgboost"              # Options: xgboost, random_forest
+  n_estimators: 200
+  max_depth: 6
+  learning_rate: 0.1
+  random_state: 42
+
+fusion:
+  cnn_weight: 0.6              # Weight for CNN prediction in late fusion
+  biomarker_weight: 0.4        # Weight for biomarker model prediction
+
+prioritization:
+  thresholds:
+    urgent: 0.75               # Score >= 0.75 → Urgent referral
+    moderate: 0.45              # 0.45 <= Score < 0.75 → Moderate risk
+    low: 0.0                   # Score < 0.45 → Low risk / routine screening

@@ -1,0 +1,34 @@
+# Data directories
+data/raw/
+data/processed/
+data/sample_inputs/
+
+# Saved models
+saved_models/*.pkl
+saved_models/*.h5
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Environment
+.env
+.venv/
+venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# Jupyter checkpoints
+.ipynb_checkpoints/
+
+# OS
+.DS_Store
+Thumbs.db
