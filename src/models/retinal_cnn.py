@@ -8,9 +8,9 @@ for classifying fundus images into DR severity grades (0–4).
 from typing import Optional, Tuple
 
 import tensorflow as tf
-from tensorflow import keras
-from tensorflow.keras import layers, Model
-from tensorflow.keras.applications import (
+import keras
+from keras import layers, Model
+from keras.applications import (
     ResNet50,
     EfficientNetB0,
     EfficientNetB3,

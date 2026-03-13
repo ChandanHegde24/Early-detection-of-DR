@@ -14,29 +14,52 @@ An AI-powered system for the early detection and severity grading of **Diabetic 
 
 ## Architecture
 
-```
-┌─────────────────────┐     ┌─────────────────────┐
-│  Clinical Biomarkers│     │  Retinal Fundus Image│
-│  (age, HbA1c, BP…) │     │  (224×224 RGB)       │
-└────────┬────────────┘     └────────┬─────────────┘
-         │                           │
-         ▼                           ▼
-┌─────────────────────┐     ┌─────────────────────┐
-│  XGBoost / RF       │     │  EfficientNetB0 (TL) │
-│  Biomarker Model    │     │  CNN Classifier       │
-└────────┬────────────┘     └────────┬─────────────┘
-         │  probabilities            │  probabilities
-         └──────────┬────────────────┘
-                    ▼
-          ┌─────────────────┐
-          │   Late Fusion   │
-          │ (weighted avg)  │
-          └────────┬────────┘
-                   ▼
-          ┌─────────────────┐
-          │  Unified Score  │──► Screening Tier
-          │  DR Grade (0-4) │──► Grad-CAM Explanation
-          └─────────────────┘
+```mermaid
+flowchart TB
+    subgraph INPUT ["🔬 INPUT DATA"]
+        direction LR
+        BIO["🩺 Clinical Biomarkers\n─────────────────\nAge · BMI · HbA1c\nBlood Pressure\nCholesterol · Triglycerides\nDiabetes Duration"]
+        IMG["👁️ Retinal Fundus Image\n─────────────────\n224 × 224 RGB\nCLAHE Enhanced\nAugmented"]
+    end
+
+    subgraph PREPROCESS ["⚙️ PREPROCESSING"]
+        direction LR
+        TAB_PREP["📊 Tabular Pipeline\n─────────────────\nImputation · Scaling\nEncoding"]
+        IMG_PREP["🖼️ Image Pipeline\n─────────────────\nCrop · CLAHE\nResize · Augment"]
+    end
+
+    subgraph MODELS ["🧠 AI MODELS"]
+        direction LR
+        XGB["🌳 XGBoost / Random Forest\n─────────────────\nBiomarker Risk Model\nn_estimators: 200\nmax_depth: 6"]
+        CNN["🔮 EfficientNetB0\n─────────────────\nTransfer Learning CNN\nImageNet Pretrained\nFine-Tuned"]
+    end
+
+    subgraph FUSION ["⚡ LATE FUSION"]
+        FUSE["🔗 Weighted Average\n─────────────────\nCNN: 60% · Biomarker: 40%\nUnified Probability Vector"]
+    end
+
+    subgraph OUTPUT ["📋 OUTPUT"]
+        direction LR
+        GRADE["🎯 DR Grade\n─────────────\n0 — No DR\n1 — Mild\n2 — Moderate\n3 — Severe\n4 — Proliferative"]
+        SCORE["📈 Risk Score\n─────────────\nContinuous 0–1\nSeverity-Weighted"]
+        TIER["🚦 Screening Tier\n─────────────\n🔴 Urgent ≥ 0.75\n🟡 Moderate ≥ 0.45\n🟢 Low Risk < 0.45"]
+        EXPLAIN["🔍 Grad-CAM\n─────────────\nHeatmap Overlay\nRegion Highlighting\nClinical Trust"]
+    end
+
+    BIO --> TAB_PREP --> XGB
+    IMG --> IMG_PREP --> CNN
+    XGB -->|"probabilities"| FUSE
+    CNN -->|"probabilities"| FUSE
+    FUSE --> GRADE
+    FUSE --> SCORE
+    FUSE --> TIER
+    CNN -.->|"explainability"| EXPLAIN
+
+    style INPUT fill:#e8f4f8,stroke:#2196F3,stroke-width:2px
+    style PREPROCESS fill:#fff3e0,stroke:#FF9800,stroke-width:2px
+    style MODELS fill:#f3e5f5,stroke:#9C27B0,stroke-width:2px
+    style FUSION fill:#fce4ec,stroke:#E91E63,stroke-width:2px
+    style OUTPUT fill:#e8f5e9,stroke:#4CAF50,stroke-width:2px
 ```
 
 ## DR Severity Grades
@@ -80,8 +103,8 @@ An AI-powered system for the early detection and severity grading of **Diabetic 
 
 ```bash
 # 1. Clone the repository
-git clone https://github.com/ChandnaHegde24/diabetic-retinopathy-ai.git
-cd diabetic-retinopathy-ai
+git clone https://github.com/ChandanHegde24/Early-detection-of-DR.git
+cd Early-detection-of-DR
 
 # 2. Create a virtual environment
 python -m venv venv

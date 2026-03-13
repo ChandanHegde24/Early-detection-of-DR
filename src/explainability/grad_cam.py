@@ -11,7 +11,8 @@ from typing import Optional, Tuple
 import cv2
 import numpy as np
 import tensorflow as tf
-from tensorflow.keras import Model
+import keras
+from keras import Model
 
 from src.config import load_settings
 
@@ -30,9 +31,9 @@ def find_target_layer(model: Model) -> str:
     for layer in reversed(model.layers):
         if isinstance(layer, Model):
             for sub_layer in reversed(layer.layers):
-                if isinstance(sub_layer, tf.keras.layers.Conv2D):
+                if isinstance(sub_layer, keras.layers.Conv2D):
                     return sub_layer.name
-        if isinstance(layer, tf.keras.layers.Conv2D):
+        if isinstance(layer, keras.layers.Conv2D):
             return layer.name
 
     raise ValueError("No Conv2D layer found in the model.")
