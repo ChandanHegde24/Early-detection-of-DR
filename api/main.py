@@ -11,6 +11,7 @@ Endpoints:
 import io
 import os
 import sys
+import base64
 import logging
 from pathlib import Path
 from contextlib import asynccontextmanager
@@ -21,16 +22,16 @@ import joblib
 from PIL import Image
 from fastapi import FastAPI, File, UploadFile, Form, HTTPException
 from fastapi.responses import JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
 
 # Add project root to path
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.config import load_settings
-from src.data_prep.image_loader import preprocess_single_image
 from src.models.biomarker_rf import load_biomarker_model, predict_biomarker_proba
 from src.models.retinal_cnn import load_cnn_model
-from src.models.late_fusion import unified_prediction, compute_risk_score
+from src.models.late_fusion import unified_prediction
 from src.explainability.grad_cam import explain_prediction
 from api.schemas import (
     BiomarkerInput,
@@ -95,6 +96,17 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 
 def _biomarker_to_array(bio: BiomarkerInput) -> np.ndarray:
     """Convert BiomarkerInput to a numpy array in the correct feature order."""
@@ -107,6 +119,8 @@ def _build_response(
     proba: np.ndarray,
     model_used: str,
     grad_cam_available: bool = False,
+    grad_cam_heatmap: Optional[str] = None,
+    grad_cam_overlay: Optional[str] = None,
 ) -> PredictionResponse:
     """Build a standardized PredictionResponse."""
     tier, _, grade_label = prioritize(risk_score, predicted_grade)
@@ -124,7 +138,34 @@ def _build_response(
         grade_probabilities=grade_probs,
         model_used=model_used,
         grad_cam_available=grad_cam_available,
+        grad_cam_heatmap=grad_cam_heatmap,
+        grad_cam_overlay=grad_cam_overlay,
     )
+
+
+def _encode_image_to_data_url(image: np.ndarray, mode: str) -> str:
+    """Encode a numpy image array to a PNG base64 data URL."""
+    image_pil = Image.fromarray(image, mode=mode)
+    buffer = io.BytesIO()
+    image_pil.save(buffer, format="PNG")
+    encoded = base64.b64encode(buffer.getvalue()).decode("utf-8")
+    return f"data:image/png;base64,{encoded}"
+
+
+def _generate_gradcam_payload(
+    image_for_model: np.ndarray,
+    predicted_grade: int,
+) -> tuple[str, str]:
+    """Return encoded Grad-CAM heatmap and overlay images."""
+    overlay, heatmap, _, _ = explain_prediction(
+        _models["cnn"],
+        image_for_model,
+        target_class=predicted_grade,
+    )
+    heatmap_img = np.uint8(np.clip(heatmap, 0.0, 1.0) * 255)
+    heatmap_b64 = _encode_image_to_data_url(heatmap_img, mode="L")
+    overlay_b64 = _encode_image_to_data_url(overlay, mode="RGB")
+    return heatmap_b64, overlay_b64
 
 
 # ─── Endpoints ──────────────────────────────────────────────────
@@ -180,8 +221,17 @@ async def predict_image(file: UploadFile = File(...)):
     grade = int(np.argmax(pred))
     severity_weights = np.array([0.0, 0.25, 0.5, 0.75, 1.0])
     risk_score = float(pred @ severity_weights)
+    heatmap_b64, overlay_b64 = _generate_gradcam_payload(img_resized, grade)
 
-    return _build_response(grade, risk_score, pred, model_used="cnn", grad_cam_available=True)
+    return _build_response(
+        grade,
+        risk_score,
+        pred,
+        model_used="cnn",
+        grad_cam_available=True,
+        grad_cam_heatmap=heatmap_b64,
+        grad_cam_overlay=overlay_b64,
+    )
 
 
 @app.post("/predict/unified", response_model=PredictionResponse)
@@ -235,11 +285,14 @@ async def predict_unified(
     grades, risk_scores, fused_proba = unified_prediction(cnn_proba, bio_proba)
     grade = int(grades[0])
     risk_score = float(risk_scores[0])
+    heatmap_b64, overlay_b64 = _generate_gradcam_payload(img_resized, grade)
 
     return _build_response(
         grade, risk_score, fused_proba[0],
         model_used="unified (CNN + Biomarker)",
         grad_cam_available=True,
+        grad_cam_heatmap=heatmap_b64,
+        grad_cam_overlay=overlay_b64,
     )
 
 

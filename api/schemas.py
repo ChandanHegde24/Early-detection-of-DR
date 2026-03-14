@@ -51,6 +51,14 @@ class PredictionResponse(BaseModel):
     grad_cam_available: bool = Field(
         default=False, description="Whether a Grad-CAM heatmap was generated"
     )
+    grad_cam_heatmap: Optional[str] = Field(
+        default=None,
+        description="Optional base64 data URL for Grad-CAM heatmap image",
+    )
+    grad_cam_overlay: Optional[str] = Field(
+        default=None,
+        description="Optional base64 data URL for overlay of heatmap on fundus image",
+    )
 
 
 class HealthResponse(BaseModel):
