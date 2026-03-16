@@ -13,15 +13,17 @@ import os
 import sys
 import base64
 import logging
+import importlib
 from pathlib import Path
 from contextlib import asynccontextmanager
 from typing import Optional
 
 import numpy as np
 import joblib
+import cv2
 from PIL import Image
 from fastapi import FastAPI, File, UploadFile, Form, HTTPException
-from fastapi.responses import JSONResponse
+from fastapi.responses import Response
 from fastapi.middleware.cors import CORSMiddleware
 
 # Add project root to path
@@ -33,6 +35,7 @@ from src.models.biomarker_rf import load_biomarker_model, predict_biomarker_prob
 from src.models.retinal_cnn import load_cnn_model
 from src.models.late_fusion import unified_prediction
 from src.explainability.grad_cam import explain_prediction
+from src.data_prep.image_loader import apply_clahe, crop_to_circle
 from api.schemas import (
     BiomarkerInput,
     PredictionRequest,
@@ -40,7 +43,11 @@ from api.schemas import (
     GradeProbability,
     HealthResponse,
 )
-from api.prioritization import prioritize, get_grade_label
+from api.prioritization import (
+    prioritize,
+    clinical_recommendation_from_score,
+    compute_clinical_rule_score,
+)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -118,6 +125,9 @@ def _build_response(
     risk_score: float,
     proba: np.ndarray,
     model_used: str,
+    baseline_clinical_score: Optional[float] = None,
+    baseline_recommendation: Optional[str] = None,
+    baseline_factor_breakdown: Optional[dict] = None,
     grad_cam_available: bool = False,
     grad_cam_heatmap: Optional[str] = None,
     grad_cam_overlay: Optional[str] = None,
@@ -137,6 +147,12 @@ def _build_response(
         screening_tier=tier,
         grade_probabilities=grade_probs,
         model_used=model_used,
+        baseline_clinical_score=(
+            round(float(baseline_clinical_score), 4)
+            if baseline_clinical_score is not None else None
+        ),
+        baseline_recommendation=baseline_recommendation,
+        baseline_factor_breakdown=baseline_factor_breakdown,
         grad_cam_available=grad_cam_available,
         grad_cam_heatmap=grad_cam_heatmap,
         grad_cam_overlay=grad_cam_overlay,
@@ -166,6 +182,183 @@ def _generate_gradcam_payload(
     heatmap_b64 = _encode_image_to_data_url(heatmap_img, mode="L")
     overlay_b64 = _encode_image_to_data_url(overlay, mode="RGB")
     return heatmap_b64, overlay_b64
+
+
+def _extract_biomarkers_from_form(
+    age: float,
+    bmi: float,
+    hba1c: float,
+    blood_pressure_systolic: float,
+    blood_pressure_diastolic: float,
+    cholesterol_total: float,
+    cholesterol_hdl: float,
+    cholesterol_ldl: float,
+    triglycerides: float,
+    diabetes_duration_years: float,
+    smoking_status: int,
+    family_history_dr: int,
+) -> BiomarkerInput:
+    return BiomarkerInput(
+        age=age,
+        bmi=bmi,
+        hba1c=hba1c,
+        blood_pressure_systolic=blood_pressure_systolic,
+        blood_pressure_diastolic=blood_pressure_diastolic,
+        cholesterol_total=cholesterol_total,
+        cholesterol_hdl=cholesterol_hdl,
+        cholesterol_ldl=cholesterol_ldl,
+        triglycerides=triglycerides,
+        diabetes_duration_years=diabetes_duration_years,
+        smoking_status=smoking_status,
+        family_history_dr=family_history_dr,
+    )
+
+
+def _preprocess_image_for_inference(image_bytes: bytes) -> np.ndarray:
+    """Apply Stage-2 preprocessing: crop + CLAHE + resize + normalization."""
+    image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+    image_np = np.array(image, dtype=np.uint8)
+    image_np = crop_to_circle(image_np)
+    image_np = apply_clahe(image_np)
+    target = tuple(settings["image"]["target_size"])
+    image_np = cv2.resize(image_np, target, interpolation=cv2.INTER_AREA)
+    return image_np.astype(np.float32) / 255.0
+
+
+def _predict_unified_from_inputs(
+    image_bytes: bytes,
+    biomarkers: BiomarkerInput,
+    include_gradcam: bool = True,
+) -> PredictionResponse:
+    if _models["cnn"] is None or _models["biomarker"] is None:
+        raise HTTPException(status_code=503, detail="Both models must be loaded for unified prediction.")
+
+    # Stage 2: preprocessing and CNN inference
+    img_resized = _preprocess_image_for_inference(image_bytes)
+    cnn_proba = _models["cnn"].predict(np.expand_dims(img_resized, axis=0), verbose=0)
+
+    # Stage 1: rule-based baseline clinical score
+    baseline_score, factors = compute_clinical_rule_score(biomarkers)
+    baseline_recommendation = clinical_recommendation_from_score(baseline_score)
+
+    # Biomarker model inference
+    X = _biomarker_to_array(biomarkers)
+    if _models["scaler"] is not None:
+        X = _models["scaler"].transform(X)
+    bio_proba = predict_biomarker_proba(_models["biomarker"], X)
+
+    # Late fusion
+    grades, risk_scores, fused_proba = unified_prediction(cnn_proba, bio_proba)
+    grade = int(grades[0])
+    risk_score = float(risk_scores[0])
+
+    heatmap_b64 = None
+    overlay_b64 = None
+    if include_gradcam:
+        heatmap_b64, overlay_b64 = _generate_gradcam_payload(img_resized, grade)
+
+    return _build_response(
+        grade,
+        risk_score,
+        fused_proba[0],
+        model_used="unified (CNN + Biomarker + Rule-based Stage-1)",
+        baseline_clinical_score=baseline_score,
+        baseline_recommendation=baseline_recommendation,
+        baseline_factor_breakdown=factors,
+        grad_cam_available=include_gradcam,
+        grad_cam_heatmap=heatmap_b64,
+        grad_cam_overlay=overlay_b64,
+    )
+
+
+def _decode_data_url_to_bytes(data_url: str) -> bytes:
+    """Decode a data URL (base64 PNG/JPG) into raw bytes."""
+    if "," not in data_url:
+        raise ValueError("Invalid data URL")
+    return base64.b64decode(data_url.split(",", 1)[1])
+
+
+def _build_clinical_report_pdf(response: PredictionResponse, biomarkers: BiomarkerInput) -> bytes:
+    """Create a concise PDF with Stage-1, Stage-2, and Stage-3 outputs."""
+    try:
+        pagesizes_module = importlib.import_module("reportlab.lib.pagesizes")
+        pdfgen_canvas_module = importlib.import_module("reportlab.pdfgen.canvas")
+        utils_module = importlib.import_module("reportlab.lib.utils")
+    except ModuleNotFoundError as exc:
+        raise HTTPException(
+            status_code=500,
+            detail="PDF report dependency missing. Install reportlab to enable report export.",
+        ) from exc
+
+    A4 = pagesizes_module.A4
+    canvas = pdfgen_canvas_module
+    ImageReader = utils_module.ImageReader
+
+    buffer = io.BytesIO()
+    pdf = canvas.Canvas(buffer, pagesize=A4)
+    width, height = A4
+
+    y = height - 40
+    pdf.setTitle("DR Clinical Screening Report")
+    pdf.setFont("Helvetica-Bold", 16)
+    pdf.drawString(40, y, "Diabetic Retinopathy Clinical Screening Report")
+
+    y -= 24
+    pdf.setFont("Helvetica", 10)
+    pdf.drawString(40, y, "Stage 1: Rule-Based Baseline Clinical Risk")
+    y -= 16
+    baseline_score = response.baseline_clinical_score if response.baseline_clinical_score is not None else 0.0
+    pdf.drawString(50, y, f"Baseline clinical score: {baseline_score:.3f}")
+    y -= 14
+    recommendation = response.baseline_recommendation or "Not available"
+    pdf.drawString(50, y, f"Recommendation: {recommendation}")
+
+    y -= 22
+    pdf.drawString(40, y, "Stage 2: AI DR Grading")
+    y -= 16
+    pdf.drawString(50, y, f"Predicted grade: {response.predicted_grade} ({response.predicted_label})")
+    y -= 14
+    pdf.drawString(50, y, f"Unified risk score: {response.risk_score:.3f}")
+    y -= 14
+    pdf.drawString(50, y, f"Screening tier: {response.screening_tier}")
+
+    y -= 22
+    pdf.drawString(40, y, "Biomarker Snapshot")
+    y -= 16
+    pdf.drawString(50, y, f"HbA1c: {biomarkers.hba1c:.2f}%, SBP: {biomarkers.blood_pressure_systolic:.0f} mmHg, BMI: {biomarkers.bmi:.1f}")
+    y -= 14
+    pdf.drawString(50, y, f"LDL: {biomarkers.cholesterol_ldl:.0f} mg/dL, Triglycerides: {biomarkers.triglycerides:.0f} mg/dL")
+
+    y -= 22
+    pdf.drawString(40, y, "Grade Probabilities")
+    y -= 16
+    for prob in response.grade_probabilities:
+        pdf.drawString(50, y, f"Grade {prob.grade} ({prob.label}): {prob.probability:.3f}")
+        y -= 13
+        if y < 120:
+            pdf.showPage()
+            y = height - 40
+            pdf.setFont("Helvetica", 10)
+
+    if response.grad_cam_overlay:
+        try:
+            overlay_bytes = _decode_data_url_to_bytes(response.grad_cam_overlay)
+            image_reader = ImageReader(io.BytesIO(overlay_bytes))
+            img_w = width - 120
+            img_h = 220
+            if y < img_h + 80:
+                pdf.showPage()
+                y = height - 40
+            pdf.drawString(40, y - 6, "Stage 3: Grad-CAM Overlay")
+            y -= img_h + 16
+            pdf.drawImage(image_reader, 60, y, width=img_w, height=img_h, preserveAspectRatio=True, mask="auto")
+        except Exception:
+            # Keep PDF generation resilient if image decoding fails.
+            pass
+
+    pdf.save()
+    buffer.seek(0)
+    return buffer.getvalue()
 
 
 # ─── Endpoints ──────────────────────────────────────────────────
@@ -198,8 +391,18 @@ async def predict_biomarker(request: PredictionRequest):
     grade = int(np.argmax(proba))
     severity_weights = np.array([0.0, 0.25, 0.5, 0.75, 1.0])
     risk_score = float(proba @ severity_weights)
+    baseline_score, factors = compute_clinical_rule_score(request.biomarkers)
+    baseline_recommendation = clinical_recommendation_from_score(baseline_score)
 
-    return _build_response(grade, risk_score, proba, model_used="biomarker")
+    return _build_response(
+        grade,
+        risk_score,
+        proba,
+        model_used="biomarker + rule-based stage-1",
+        baseline_clinical_score=baseline_score,
+        baseline_recommendation=baseline_recommendation,
+        baseline_factor_breakdown=factors,
+    )
 
 
 @app.post("/predict/image", response_model=PredictionResponse)
@@ -209,13 +412,7 @@ async def predict_image(file: UploadFile = File(...)):
         raise HTTPException(status_code=503, detail="CNN model not loaded.")
 
     contents = await file.read()
-    image = Image.open(io.BytesIO(contents)).convert("RGB")
-    img_array = np.array(image).astype(np.float32) / 255.0
-
-    # Resize
-    import cv2
-    target = tuple(settings["image"]["target_size"])
-    img_resized = cv2.resize(img_array, target)
+    img_resized = _preprocess_image_for_inference(contents)
 
     pred = _models["cnn"].predict(np.expand_dims(img_resized, axis=0), verbose=0)[0]
     grade = int(np.argmax(pred))
@@ -251,48 +448,65 @@ async def predict_unified(
     family_history_dr: int = Form(...),
 ):
     """Predict DR using both image + biomarkers (late fusion)."""
-    if _models["cnn"] is None or _models["biomarker"] is None:
-        raise HTTPException(status_code=503, detail="Both models must be loaded for unified prediction.")
-
-    # Process image
     contents = await file.read()
-    image = Image.open(io.BytesIO(contents)).convert("RGB")
-    img_array = np.array(image).astype(np.float32) / 255.0
-    import cv2
-    target = tuple(settings["image"]["target_size"])
-    img_resized = cv2.resize(img_array, target)
-    cnn_proba = _models["cnn"].predict(np.expand_dims(img_resized, axis=0), verbose=0)
-
-    # Process biomarkers
-    bio = BiomarkerInput(
-        age=age, bmi=bmi, hba1c=hba1c,
-        blood_pressure_systolic=blood_pressure_systolic,
-        blood_pressure_diastolic=blood_pressure_diastolic,
-        cholesterol_total=cholesterol_total,
-        cholesterol_hdl=cholesterol_hdl,
-        cholesterol_ldl=cholesterol_ldl,
-        triglycerides=triglycerides,
-        diabetes_duration_years=diabetes_duration_years,
-        smoking_status=smoking_status,
-        family_history_dr=family_history_dr,
+    bio = _extract_biomarkers_from_form(
+        age,
+        bmi,
+        hba1c,
+        blood_pressure_systolic,
+        blood_pressure_diastolic,
+        cholesterol_total,
+        cholesterol_hdl,
+        cholesterol_ldl,
+        triglycerides,
+        diabetes_duration_years,
+        smoking_status,
+        family_history_dr,
     )
-    X = _biomarker_to_array(bio)
-    if _models["scaler"] is not None:
-        X = _models["scaler"].transform(X)
-    bio_proba = predict_biomarker_proba(_models["biomarker"], X)
+    return _predict_unified_from_inputs(contents, bio, include_gradcam=True)
 
-    # Late fusion
-    grades, risk_scores, fused_proba = unified_prediction(cnn_proba, bio_proba)
-    grade = int(grades[0])
-    risk_score = float(risk_scores[0])
-    heatmap_b64, overlay_b64 = _generate_gradcam_payload(img_resized, grade)
 
-    return _build_response(
-        grade, risk_score, fused_proba[0],
-        model_used="unified (CNN + Biomarker)",
-        grad_cam_available=True,
-        grad_cam_heatmap=heatmap_b64,
-        grad_cam_overlay=overlay_b64,
+@app.post("/predict/unified/report")
+async def predict_unified_report(
+    file: UploadFile = File(...),
+    age: float = Form(...),
+    bmi: float = Form(...),
+    hba1c: float = Form(...),
+    blood_pressure_systolic: float = Form(...),
+    blood_pressure_diastolic: float = Form(...),
+    cholesterol_total: float = Form(...),
+    cholesterol_hdl: float = Form(...),
+    cholesterol_ldl: float = Form(...),
+    triglycerides: float = Form(...),
+    diabetes_duration_years: float = Form(...),
+    smoking_status: int = Form(...),
+    family_history_dr: int = Form(...),
+):
+    """Run unified prediction and return a downloadable clinical PDF report."""
+    contents = await file.read()
+    bio = _extract_biomarkers_from_form(
+        age,
+        bmi,
+        hba1c,
+        blood_pressure_systolic,
+        blood_pressure_diastolic,
+        cholesterol_total,
+        cholesterol_hdl,
+        cholesterol_ldl,
+        triglycerides,
+        diabetes_duration_years,
+        smoking_status,
+        family_history_dr,
+    )
+    result = _predict_unified_from_inputs(contents, bio, include_gradcam=True)
+    pdf_bytes = _build_clinical_report_pdf(result, bio)
+
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": "attachment; filename=dr_clinical_report.pdf"
+        },
     )
 
 

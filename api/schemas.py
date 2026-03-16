@@ -2,7 +2,7 @@
 Pydantic schemas defining the API request/response data formats.
 """
 
-from typing import List, Optional
+from typing import List, Optional, Dict
 from pydantic import BaseModel, Field
 
 
@@ -48,6 +48,20 @@ class PredictionResponse(BaseModel):
         ..., description="Per-class probability breakdown"
     )
     model_used: str = Field(..., description="Which model(s) contributed to the prediction")
+    baseline_clinical_score: Optional[float] = Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        description="Rule-based baseline clinical risk score before image analysis",
+    )
+    baseline_recommendation: Optional[str] = Field(
+        default=None,
+        description="Stage-1 recommendation from the clinical rules engine",
+    )
+    baseline_factor_breakdown: Optional[Dict[str, float]] = Field(
+        default=None,
+        description="Contribution of each clinical risk factor to baseline score",
+    )
     grad_cam_available: bool = Field(
         default=False, description="Whether a Grad-CAM heatmap was generated"
     )

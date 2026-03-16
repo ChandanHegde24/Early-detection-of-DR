@@ -8,6 +8,7 @@ import { ProbabilityChart } from "@/components/results/ProbabilityChart";
 import { GradCamPanel } from "@/components/results/GradCamPanel";
 import { usePrediction } from "@/hooks/usePrediction";
 import { biomarkerDefaults } from "@/lib/validation/biomarker-schema";
+import { downloadUnifiedReport } from "@/lib/api/client";
 import type { BiomarkerInput } from "@/lib/api/types";
 
 export default function ScreeningPage() {
@@ -21,6 +22,13 @@ export default function ScreeningPage() {
       return;
     }
     await submitUnified(imageFile, biomarkers);
+  }
+
+  async function handleDownloadReport() {
+    if (!imageFile) {
+      return;
+    }
+    await downloadUnifiedReport(imageFile, biomarkers);
   }
 
   function handleReset() {
@@ -73,6 +81,16 @@ export default function ScreeningPage() {
 
         {result ? (
           <section className="space-y-6">
+            <div className="flex flex-wrap items-center gap-3">
+              <button
+                type="button"
+                disabled={loading || !imageFile}
+                onClick={handleDownloadReport}
+                className="rounded-xl border border-cyan-300 bg-cyan-50 px-5 py-3 text-sm font-semibold text-cyan-900 transition hover:bg-cyan-100 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                Download Clinical PDF Report
+              </button>
+            </div>
             <RiskCard result={result} />
             <div className="grid grid-cols-1 gap-6 xl:grid-cols-2">
               <ProbabilityChart result={result} />

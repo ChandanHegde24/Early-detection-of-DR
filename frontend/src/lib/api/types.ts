@@ -26,6 +26,9 @@ export type PredictionResponse = {
   screening_tier: string;
   grade_probabilities: GradeProbability[];
   model_used: string;
+  baseline_clinical_score: number | null;
+  baseline_recommendation: string | null;
+  baseline_factor_breakdown: Record<string, number> | null;
   grad_cam_available: boolean;
   grad_cam_heatmap: string | null;
   grad_cam_overlay: string | null;

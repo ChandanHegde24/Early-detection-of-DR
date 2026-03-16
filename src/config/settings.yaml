@@ -68,3 +68,6 @@ prioritization:
     urgent: 0.75               # Score >= 0.75 → Urgent referral
     moderate: 0.45              # 0.45 <= Score < 0.75 → Moderate risk
     low: 0.0                   # Score < 0.45 → Low risk / routine screening
+
+clinical_rules:
+  recommend_fundus_threshold: 0.55  # Stage-1 baseline risk cutoff for fundus scan recommendation

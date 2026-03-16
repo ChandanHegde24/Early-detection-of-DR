@@ -39,3 +39,43 @@ export async function predictUnified(
 
   return (await res.json()) as PredictionResponse;
 }
+
+export async function downloadUnifiedReport(
+  imageFile: File,
+  biomarkers: BiomarkerInput,
+): Promise<void> {
+  const form = new FormData();
+  form.append("file", imageFile);
+
+  for (const [key, value] of Object.entries(biomarkers)) {
+    form.append(key, String(value));
+  }
+
+  const res = await fetch(`${API_BASE}/predict/unified/report`, {
+    method: "POST",
+    body: form,
+  });
+
+  if (!res.ok) {
+    let message = "Failed to generate PDF report";
+    try {
+      const payload = await res.json();
+      if (payload?.detail) {
+        message = String(payload.detail);
+      }
+    } catch {
+      // Keep fallback message when API does not return JSON
+    }
+    throw new Error(message);
+  }
+
+  const blob = await res.blob();
+  const url = window.URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = "dr_clinical_report.pdf";
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  window.URL.revokeObjectURL(url);
+}

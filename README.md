@@ -6,11 +6,12 @@ An AI-powered system for the early detection and severity grading of **Diabetic 
 
 ## Objectives
 
-1. **Biomarker-based risk prediction** — XGBoost/Random Forest model on clinical data (HbA1c, blood pressure, cholesterol, etc.)
-2. **CNN-based retinal image classification** — Transfer learning (EfficientNet/ResNet) on fundus photographs
-3. **Improved early detection** — Late fusion of both models into a unified risk score
-4. **Interpretability** — Grad-CAM heatmaps highlighting diagnostically relevant retinal regions
-5. **Screening prioritization** — Automatic triage into Urgent / Moderate / Low Risk tiers
+1. **Rule-based Stage-1 clinical gatekeeper** — expert-threshold baseline risk scoring (SBP, HbA1c, BMI, lipids, duration, etc.) with recommendation to proceed to fundus scan
+2. **Biomarker-based risk prediction** — XGBoost/Random Forest model on clinical data (HbA1c, blood pressure, cholesterol, etc.)
+3. **CNN-based retinal image classification** — Transfer learning (EfficientNet/ResNet) on fundus photographs
+4. **Improved early detection** — Late fusion of both models into a unified risk score
+5. **Interpretability** — Grad-CAM heatmaps highlighting diagnostically relevant retinal regions
+6. **Clinical reporting** — one-click downloadable PDF report combining Stage-1 baseline score, DR grade, and Grad-CAM visualization
 
 ## Architecture
 
@@ -25,7 +26,11 @@ flowchart TB
     subgraph PREPROCESS ["⚙️ PREPROCESSING"]
         direction LR
         TAB_PREP["📊 Tabular Pipeline\n─────────────────\nImputation · Scaling\nEncoding"]
-        IMG_PREP["🖼️ Image Pipeline\n─────────────────\nCrop · CLAHE\nResize · Augment"]
+      IMG_PREP["🖼️ Image Pipeline\n─────────────────\nCrop · CLAHE\nResize · Normalize"]
+    end
+
+    subgraph STAGE1 ["🩺 STAGE 1 CLINICAL GATEKEEPER"]
+      RULES["📐 Rule-Based Expert Scoring\n─────────────────\nThreshold Rules\nWeighted Baseline Score\nScan Recommendation"]
     end
 
     subgraph MODELS ["🧠 AI MODELS"]
@@ -42,18 +47,26 @@ flowchart TB
         direction LR
         GRADE["🎯 DR Grade\n─────────────\n0 — No DR\n1 — Mild\n2 — Moderate\n3 — Severe\n4 — Proliferative"]
         SCORE["📈 Risk Score\n─────────────\nContinuous 0–1\nSeverity-Weighted"]
+      BASELINE["🩺 Baseline Clinical Score\n─────────────\nRule-Based 0–1\nProceed/Monitor Recommendation"]
         TIER["🚦 Screening Tier\n─────────────\n🔴 Urgent ≥ 0.75\n🟡 Moderate ≥ 0.45\n🟢 Low Risk < 0.45"]
         EXPLAIN["🔍 Grad-CAM\n─────────────\nHeatmap Overlay\nRegion Highlighting\nClinical Trust"]
+      PDF["🧾 Clinical PDF Report\n─────────────\nBaseline + Grade + Risk\nGrad-CAM Overlay\nDownloadable"]
     end
 
+    BIO --> RULES
     BIO --> TAB_PREP --> XGB
     IMG --> IMG_PREP --> CNN
     XGB -->|"probabilities"| FUSE
     CNN -->|"probabilities"| FUSE
     FUSE --> GRADE
     FUSE --> SCORE
+    RULES --> BASELINE
     FUSE --> TIER
     CNN -.->|"explainability"| EXPLAIN
+    BASELINE --> PDF
+    GRADE --> PDF
+    SCORE --> PDF
+    EXPLAIN --> PDF
 
     style INPUT fill:#e8f4f8,stroke:#2196F3,stroke-width:2px
     style PREPROCESS fill:#fff3e0,stroke:#FF9800,stroke-width:2px
@@ -64,17 +77,17 @@ flowchart TB
 
 ## DR Severity Grades
 
-| Grade | Label             | Description                          |
-|-------|-------------------|--------------------------------------|
-| 0     | No DR             | No visible signs of retinopathy      |
-| 1     | Mild NPDR         | Microaneurysms only                  |
-| 2     | Moderate NPDR     | More than just microaneurysms        |
-| 3     | Severe NPDR       | Extensive intraretinal abnormalities |
-| 4     | Proliferative DR  | Neovascularization / vitreous hemorrhage |
+| Grade | Label | Description |
+| ----- | ----- | ----------- |
+| 0 | No DR | No visible signs of retinopathy |
+| 1 | Mild NPDR | Microaneurysms only |
+| 2 | Moderate NPDR | More than just microaneurysms |
+| 3 | Severe NPDR | Extensive intraretinal abnormalities |
+| 4 | Proliferative DR | Neovascularization / vitreous hemorrhage |
 
 ## Project Structure
 
-```
+```text
 ├── data/                       # Local data (not committed)
 │   ├── raw/                    # Original images & clinical CSVs
 │   ├── processed/              # Cleaned data & augmented images
@@ -151,6 +164,27 @@ uvicorn api.main:app --reload --port 8000
 #   POST /predict/biomarker   — Predict from clinical data only
 #   POST /predict/image       — Predict from retinal image only
 #   POST /predict/unified     — Predict from both (late fusion)
+#   POST /predict/unified/report — Predict + return downloadable clinical PDF report
+```
+
+### Download Clinical PDF Report
+
+```bash
+curl -X POST http://localhost:8000/predict/unified/report \
+  -F "file=@data/sample_inputs/sample_fundus.jpg" \
+  -F "age=58" \
+  -F "bmi=28.5" \
+  -F "hba1c=8.2" \
+  -F "blood_pressure_systolic=145" \
+  -F "blood_pressure_diastolic=92" \
+  -F "cholesterol_total=240" \
+  -F "cholesterol_hdl=42" \
+  -F "cholesterol_ldl=160" \
+  -F "triglycerides=200" \
+  -F "diabetes_duration_years=12" \
+  -F "smoking_status=1" \
+  -F "family_history_dr=1" \
+  --output dr_clinical_report.pdf
 ```
 
 ### API Example
@@ -176,13 +210,14 @@ curl -X POST http://localhost:8000/predict/biomarker \
 All hyperparameters are in `src/config/settings.yaml`:
 
 | Parameter | Default | Description |
-|-----------|---------|-------------|
+| --------- | ------- | ----------- |
 | CNN backbone | EfficientNetB0 | Transfer learning base model |
 | Image size | 224×224 | Input resolution |
 | Batch size | 32 | Training batch size |
 | Learning rate | 0.0001 | Initial Adam LR |
 | Fusion weights | CNN 0.6 / Bio 0.4 | Late fusion balance |
 | Urgent threshold | ≥ 0.75 | Risk score for urgent referral |
+| Stage-1 fundus recommendation threshold | 0.55 | Baseline clinical score cutoff to recommend retinal scan |
 
 ## Technologies
 
@@ -191,6 +226,7 @@ All hyperparameters are in `src/config/settings.yaml`:
 - **Image Processing**: OpenCV, Albumentations
 - **API**: FastAPI, Pydantic
 - **Explainability**: Grad-CAM
+- **Reporting**: ReportLab (PDF generation)
 - **Visualization**: Matplotlib, Seaborn
 
 ## License
