@@ -20,7 +20,6 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 
-# Add project root to sys.path
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT))
 
@@ -77,7 +76,6 @@ def train_biomarker_pipeline(csv_path: Optional[str] = None) -> dict:
     save_path = save_biomarker_model(model)
     logger.info(f"Biomarker model saved to: {save_path}")
 
-    # Also save the scaler for inference
     import joblib
     scaler_path = f"{settings['paths']['saved_models']}/biomarker_scaler.pkl"
     joblib.dump(scaler, scaler_path)
@@ -107,11 +105,9 @@ def train_cnn_pipeline(
         "image_labels.csv",
     )
 
-    # Load labels
     labels_df = pd.read_csv(labels_csv)
     all_labels = dict(zip(labels_df["filename"], labels_df["label"]))
 
-    # Split labels for train / val
     filenames = list(all_labels.keys())
     np.random.seed(settings["tabular"]["random_state"])
     np.random.shuffle(filenames)
@@ -125,7 +121,6 @@ def train_cnn_pipeline(
     train_ds = load_image_dataset(image_dir, train_labels, is_training=True)
     val_ds = load_image_dataset(image_dir, val_labels, is_training=False)
 
-    # Phase 1: Train with frozen backbone
     logger.info("Phase 1: Training with frozen backbone...")
     model = build_cnn_model()
     model.summary(print_fn=logger.info)
@@ -140,7 +135,6 @@ def train_cnn_pipeline(
         callbacks=callbacks,
     )
 
-    # Phase 2: Fine-tune
     logger.info("Phase 2: Fine-tuning backbone layers...")
     model = unfreeze_and_fine_tune(model)
 
@@ -152,11 +146,9 @@ def train_cnn_pipeline(
         callbacks=callbacks,
     )
 
-    # Save model
     save_path = save_cnn_model(model)
     logger.info(f"CNN model saved to: {save_path}")
 
-    # Combine histories
     combined_history = {}
     for key in history1.history:
         combined_history[key] = history1.history[key] + history2.history[key]
@@ -172,10 +164,8 @@ def run_full_training(
     """Execute the complete training pipeline for both models."""
     ensure_directories()
 
-    # Train biomarker model
     bio_results = train_biomarker_pipeline(csv_path)
 
-    # Train CNN model
     cnn_history = train_cnn_pipeline(image_dir, labels_csv)
 
     logger.info("=" * 60)
@@ -184,7 +174,6 @@ def run_full_training(
     logger.info(f"  CNN final val_accuracy: {cnn_history.get('val_accuracy', [0])[-1]:.4f}")
     logger.info("=" * 60)
 
-    # Save training summary
     summary = {
         "biomarker_accuracy": bio_results["accuracy"],
         "cnn_final_val_accuracy": cnn_history.get("val_accuracy", [0])[-1],

@@ -6,7 +6,6 @@ from typing import List, Optional, Dict
 from pydantic import BaseModel, Field
 
 
-# ─── Request Schemas ────────────────────────────────────────────
 
 class BiomarkerInput(BaseModel):
     """Clinical biomarker data for a single patient."""
@@ -29,7 +28,6 @@ class PredictionRequest(BaseModel):
     biomarkers: BiomarkerInput
 
 
-# ─── Response Schemas ───────────────────────────────────────────
 
 class GradeProbability(BaseModel):
     """Probability for a single DR grade."""

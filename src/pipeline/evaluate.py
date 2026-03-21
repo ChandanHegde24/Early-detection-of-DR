@@ -105,7 +105,6 @@ def evaluate_cnn(
     labels_df = pd.read_csv(labels_csv)
     all_labels = dict(zip(labels_df["filename"], labels_df["label"]))
 
-    # Use same split as training
     filenames = list(all_labels.keys())
     np.random.seed(settings["tabular"]["random_state"])
     np.random.shuffle(filenames)
@@ -158,7 +157,6 @@ def evaluate_fused(bio_results: dict, cnn_results: dict) -> dict:
     """Evaluate the late-fused unified model."""
     logger.info("Evaluating Fused (Unified) Model...")
 
-    # Ensure aligned test samples — use minimum common length
     n = min(len(bio_results["y_test"]), len(cnn_results["y_test"]))
     y_test = bio_results["y_test"][:n]
     bio_proba = bio_results["y_proba"][:n]
@@ -217,14 +215,11 @@ def run_full_evaluation(
     output_dir = os.path.join(settings["paths"]["saved_models"], "evaluation")
     os.makedirs(output_dir, exist_ok=True)
 
-    # Evaluate individual models
     bio_results = evaluate_biomarker(csv_path)
     cnn_results = evaluate_cnn(image_dir, labels_csv)
 
-    # Evaluate fused model
     fused_results = evaluate_fused(bio_results, cnn_results)
 
-    # Plot confusion matrices
     plot_confusion_matrix(
         bio_results["y_test"], bio_results["y_pred"],
         "Biomarker Model — Confusion Matrix",
@@ -241,7 +236,6 @@ def run_full_evaluation(
         os.path.join(output_dir, "cm_fused.png"),
     )
 
-    # Save summary
     summary = {
         "biomarker": {
             "accuracy": bio_results["accuracy"],
@@ -264,7 +258,6 @@ def run_full_evaluation(
         json.dump(summary, f, indent=2)
     logger.info(f"Evaluation summary saved: {summary_path}")
 
-    # Print comparison table
     logger.info("\n" + "=" * 60)
     logger.info("MODEL COMPARISON")
     logger.info("=" * 60)

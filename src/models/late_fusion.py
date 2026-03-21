@@ -19,7 +19,6 @@ from src.config import load_settings
 settings = load_settings()
 
 
-# Severity weights: higher grades contribute more to the risk score
 SEVERITY_WEIGHTS = np.array([0.0, 0.25, 0.5, 0.75, 1.0])
 
 

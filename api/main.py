@@ -26,7 +26,6 @@ from fastapi import FastAPI, File, UploadFile, Form, HTTPException
 from fastapi.responses import Response
 from fastapi.middleware.cors import CORSMiddleware
 
-# Add project root to path
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
@@ -54,7 +53,6 @@ logger = logging.getLogger(__name__)
 
 settings = load_settings()
 
-# Global model references
 _models = {
     "biomarker": None,
     "scaler": None,
@@ -233,21 +231,17 @@ def _predict_unified_from_inputs(
     if _models["cnn"] is None or _models["biomarker"] is None:
         raise HTTPException(status_code=503, detail="Both models must be loaded for unified prediction.")
 
-    # Stage 2: preprocessing and CNN inference
     img_resized = _preprocess_image_for_inference(image_bytes)
     cnn_proba = _models["cnn"].predict(np.expand_dims(img_resized, axis=0), verbose=0)
 
-    # Stage 1: rule-based baseline clinical score
     baseline_score, factors = compute_clinical_rule_score(biomarkers)
     baseline_recommendation = clinical_recommendation_from_score(baseline_score)
 
-    # Biomarker model inference
     X = _biomarker_to_array(biomarkers)
     if _models["scaler"] is not None:
         X = _models["scaler"].transform(X)
     bio_proba = predict_biomarker_proba(_models["biomarker"], X)
 
-    # Late fusion
     grades, risk_scores, fused_proba = unified_prediction(cnn_proba, bio_proba)
     grade = int(grades[0])
     risk_score = float(risk_scores[0])
@@ -353,7 +347,6 @@ def _build_clinical_report_pdf(response: PredictionResponse, biomarkers: Biomark
             y -= img_h + 16
             pdf.drawImage(image_reader, 60, y, width=img_w, height=img_h, preserveAspectRatio=True, mask="auto")
         except Exception:
-            # Keep PDF generation resilient if image decoding fails.
             pass
 
     pdf.save()
@@ -361,7 +354,6 @@ def _build_clinical_report_pdf(response: PredictionResponse, biomarkers: Biomark
     return buffer.getvalue()
 
 
-# ─── Endpoints ──────────────────────────────────────────────────
 
 @app.get("/health", response_model=HealthResponse)
 async def health_check():

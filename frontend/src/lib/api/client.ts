@@ -32,7 +32,6 @@ export async function predictUnified(
         message = String(payload.detail);
       }
     } catch {
-      // Keep fallback message when API does not return JSON
     }
     throw new Error(message);
   }
@@ -64,7 +63,6 @@ export async function downloadUnifiedReport(
         message = String(payload.detail);
       }
     } catch {
-      // Keep fallback message when API does not return JSON
     }
     throw new Error(message);
   }

@@ -73,7 +73,6 @@ def generate_grad_cam(
 
     img_tensor = tf.expand_dims(tf.cast(image, tf.float32), axis=0)
 
-    # Build a sub-model that outputs both activations and predictions
     base_model = None
     for layer in model.layers:
         if isinstance(layer, Model):
@@ -104,14 +103,12 @@ def generate_grad_cam(
 
     grads = tape.gradient(class_output, conv_outputs)
 
-    # Global average pooling of gradients
     pooled_grads = tf.reduce_mean(grads, axis=(0, 1, 2))
 
     conv_outputs = conv_outputs[0]
     heatmap = conv_outputs @ pooled_grads[..., tf.newaxis]
     heatmap = tf.squeeze(heatmap)
 
-    # ReLU and normalize
     heatmap = tf.maximum(heatmap, 0) / (tf.math.reduce_max(heatmap) + 1e-8)
     return heatmap.numpy()
 
