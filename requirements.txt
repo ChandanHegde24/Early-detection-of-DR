@@ -34,3 +34,8 @@ PyYAML>=6.0
 # Jupyter
 notebook>=7.0.0
 ipykernel>=6.25.0
+
+# Production additions
+python-json-logger>=2.0.0
+pytest>=7.0.0
+httpx>=0.24.0

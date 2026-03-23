@@ -22,9 +22,10 @@ import numpy as np
 import joblib
 import cv2
 from PIL import Image
-from fastapi import FastAPI, File, UploadFile, Form, HTTPException
-from fastapi.responses import Response
+from fastapi import FastAPI, File, UploadFile, Form, HTTPException, Request
+from fastapi.responses import Response, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
+from pythonjsonlogger import jsonlogger
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -50,6 +51,16 @@ from api.prioritization import (
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+logHandler = logging.StreamHandler()
+formatter = jsonlogger.JsonFormatter(
+    '%(asctime)s %(levelname)s [%(name)s] [%(filename)s:%(lineno)d] - %(message)s'
+)
+logHandler.setFormatter(formatter)
+logger.handlers.clear()
+logger.addHandler(logHandler)
+
+MAX_FILE_SIZE_MB = int(os.getenv("MAX_FILE_SIZE_MB", "50"))
+MAX_FILE_SIZE_BYTES = MAX_FILE_SIZE_MB * 1024 * 1024
 
 settings = load_settings()
 
@@ -72,22 +83,23 @@ async def lifespan(app: FastAPI):
     scaler_path = os.path.join(model_dir, "biomarker_scaler.pkl")
     cnn_path = os.path.join(model_dir, "cnn_weights.h5")
 
-    if os.path.exists(bio_path):
-        _models["biomarker"] = load_biomarker_model(bio_path)
-        logger.info("Biomarker model loaded.")
-    else:
-        logger.warning(f"Biomarker model not found at {bio_path}")
+    if not os.path.exists(bio_path):
+        raise RuntimeError(f"Critical: biomarker model missing at {bio_path}")
+    _models["biomarker"] = load_biomarker_model(bio_path)
+    logger.info("Biomarker model loaded.")
 
-    if os.path.exists(scaler_path):
-        _models["scaler"] = joblib.load(scaler_path)
-        logger.info("Scaler loaded.")
+    if not os.path.exists(scaler_path):
+        raise RuntimeError(f"Critical: scaler model missing at {scaler_path}")
+    _models["scaler"] = joblib.load(scaler_path)
+    logger.info("Scaler loaded.")
 
-    if os.path.exists(cnn_path):
-        try:
-            _models["cnn"] = load_cnn_model(cnn_path)
-            logger.info("CNN model loaded.")
-        except Exception as e:
-            logger.warning(f"Failed to load CNN: {e}")
+    if not os.path.exists(cnn_path):
+        raise RuntimeError(f"Critical: cnn model missing at {cnn_path}")
+    try:
+        _models["cnn"] = load_cnn_model(cnn_path)
+        logger.info("CNN model loaded.")
+    except Exception as e:
+        raise RuntimeError(f"Failed to load CNN: {e}") from e
 
     yield
 
@@ -100,6 +112,14 @@ app = FastAPI(
     version="1.0.0",
     lifespan=lifespan,
 )
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    logger.error(f"Unhandled exception: {exc}", exc_info=True)
+    return JSONResponse(
+        status_code=500,
+        content={"detail": "Internal server error"}
+    )
 
 app.add_middleware(
     CORSMiddleware,
@@ -214,15 +234,20 @@ def _extract_biomarkers_from_form(
 
 def _preprocess_image_for_inference(image_bytes: bytes) -> np.ndarray:
     """Apply Stage-2 preprocessing: crop + CLAHE + resize + normalization."""
-    image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-    image_np = np.array(image, dtype=np.uint8)
-    image_np = crop_to_circle(image_np)
-    image_np = apply_clahe(image_np)
-    target = tuple(settings["image"]["target_size"])
-    image_np = cv2.resize(image_np, target, interpolation=cv2.INTER_AREA)
-    return image_np.astype(np.float32) / 255.0
-
-
+    try:
+        image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+        image_np = np.array(image, dtype=np.uint8)
+        image_np = crop_to_circle(image_np)
+        image_np = apply_clahe(image_np)
+        target = tuple(settings["image"]["target_size"])
+        image_np = cv2.resize(image_np, target, interpolation=cv2.INTER_AREA)       
+        return image_np.astype(np.float32) / 255.0
+    except (IOError, ValueError, OSError) as e:
+        logger.error(f"Image preprocessing failed: {e}", exc_info=True)
+        raise HTTPException(status_code=400, detail=f"Invalid or corrupted image: {str(e)[:100]}")
+    except Exception as e:
+        logger.error(f"Unexpected error in image preprocessing: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Image processing failed")
 def _predict_unified_from_inputs(
     image_bytes: bytes,
     biomarkers: BiomarkerInput,
@@ -404,12 +429,9 @@ async def predict_image(file: UploadFile = File(...)):
         raise HTTPException(status_code=503, detail="CNN model not loaded.")
 
     contents = await file.read()
-    img_resized = _preprocess_image_for_inference(contents)
+    if len(contents) > MAX_FILE_SIZE_BYTES:
+        raise HTTPException(status_code=413, detail=f"File exceeds {MAX_FILE_SIZE_MB}MB")
 
-    pred = _models["cnn"].predict(np.expand_dims(img_resized, axis=0), verbose=0)[0]
-    grade = int(np.argmax(pred))
-    severity_weights = np.array([0.0, 0.25, 0.5, 0.75, 1.0])
-    risk_score = float(pred @ severity_weights)
     heatmap_b64, overlay_b64 = _generate_gradcam_payload(img_resized, grade)
 
     return _build_response(
@@ -441,6 +463,9 @@ async def predict_unified(
 ):
     """Predict DR using both image + biomarkers (late fusion)."""
     contents = await file.read()
+    if len(contents) > MAX_FILE_SIZE_BYTES:
+        raise HTTPException(status_code=413, detail=f"File exceeds {MAX_FILE_SIZE_MB}MB")
+
     bio = _extract_biomarkers_from_form(
         age,
         bmi,
@@ -475,7 +500,8 @@ async def predict_unified_report(
     family_history_dr: int = Form(...),
 ):
     """Run unified prediction and return a downloadable clinical PDF report."""
-    contents = await file.read()
+    contents = await file.read()    if len(contents) > MAX_FILE_SIZE_BYTES:
+        raise HTTPException(status_code=413, detail=f"File exceeds {MAX_FILE_SIZE_MB}MB")
     bio = _extract_biomarkers_from_form(
         age,
         bmi,
