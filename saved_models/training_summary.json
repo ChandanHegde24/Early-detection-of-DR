@@ -1,0 +1,5 @@
+{
+  "biomarker_accuracy": 0.2,
+  "cnn_final_val_accuracy": 0.0,
+  "cnn_final_val_loss": 1.6581794023513794
+}

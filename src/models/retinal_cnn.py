@@ -137,7 +137,7 @@ def get_callbacks() -> list:
 
 def save_cnn_model(model: Model, path: Optional[str] = None) -> str:
     """Save CNN weights to disk."""
-    path = path or f"{settings['paths']['saved_models']}/cnn_weights.h5"
+    path = path or f"{settings['paths']['saved_models']}/cnn_weights.weights.h5"
     model.save_weights(path)
     return path
 
@@ -145,7 +145,7 @@ def save_cnn_model(model: Model, path: Optional[str] = None) -> str:
 def load_cnn_model(path: Optional[str] = None,
                    backbone_name: Optional[str] = None) -> Model:
     """Rebuild the model architecture and load saved weights."""
-    path = path or f"{settings['paths']['saved_models']}/cnn_weights.h5"
+    path = path or f"{settings['paths']['saved_models']}/cnn_weights.weights.h5"
     model = build_cnn_model(backbone_name=backbone_name)
     model.load_weights(path)
     return model

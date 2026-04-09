@@ -35,7 +35,6 @@ class GradeProbability(BaseModel):
     label: str = Field(..., description="Human-readable grade label")
     probability: float = Field(..., ge=0.0, le=1.0)
 
-
 class PredictionResponse(BaseModel):
     """Unified prediction response from the AI system."""
     predicted_grade: int = Field(..., description="Predicted DR grade (0-4)")
@@ -71,7 +70,6 @@ class PredictionResponse(BaseModel):
         default=None,
         description="Optional base64 data URL for overlay of heatmap on fundus image",
     )
-
 
 class HealthResponse(BaseModel):
     """Health check response."""

@@ -81,7 +81,7 @@ async def lifespan(app: FastAPI):
 
     bio_path = os.path.join(model_dir, "biomarker_model.pkl")
     scaler_path = os.path.join(model_dir, "biomarker_scaler.pkl")
-    cnn_path = os.path.join(model_dir, "cnn_weights.h5")
+    cnn_path = os.path.join(model_dir, "cnn_weights.weights.h5")
 
     if not os.path.exists(bio_path):
         raise RuntimeError(f"Critical: biomarker model missing at {bio_path}")
@@ -200,7 +200,6 @@ def _generate_gradcam_payload(
     heatmap_b64 = _encode_image_to_data_url(heatmap_img, mode="L")
     overlay_b64 = _encode_image_to_data_url(overlay, mode="RGB")
     return heatmap_b64, overlay_b64
-
 
 def _extract_biomarkers_from_form(
     age: float,
@@ -444,7 +443,6 @@ async def predict_image(file: UploadFile = File(...)):
         grad_cam_overlay=overlay_b64,
     )
 
-
 @app.post("/predict/unified", response_model=PredictionResponse)
 async def predict_unified(
     file: UploadFile = File(...),
@@ -500,7 +498,8 @@ async def predict_unified_report(
     family_history_dr: int = Form(...),
 ):
     """Run unified prediction and return a downloadable clinical PDF report."""
-    contents = await file.read()    if len(contents) > MAX_FILE_SIZE_BYTES:
+    contents = await file.read()
+    if len(contents) > MAX_FILE_SIZE_BYTES:
         raise HTTPException(status_code=413, detail=f"File exceeds {MAX_FILE_SIZE_MB}MB")
     bio = _extract_biomarkers_from_form(
         age,
