@@ -11,6 +11,7 @@ Endpoints:
 import io
 import os
 import sys
+import asyncio
 import base64
 import logging
 import importlib
@@ -26,6 +27,10 @@ from fastapi import FastAPI, File, UploadFile, Form, HTTPException, Request
 from fastapi.responses import Response, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pythonjsonlogger import jsonlogger
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -63,6 +68,13 @@ MAX_FILE_SIZE_MB = int(os.getenv("MAX_FILE_SIZE_MB", "50"))
 MAX_FILE_SIZE_BYTES = MAX_FILE_SIZE_MB * 1024 * 1024
 
 settings = load_settings()
+
+# Load environment configuration
+CORS_ORIGINS = os.getenv("CORS_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000").split(",")
+TIER_URGENT = float(os.getenv("TIER_URGENT_THRESHOLD", "0.75"))
+TIER_MODERATE = float(os.getenv("TIER_MODERATE_THRESHOLD", "0.45"))
+GRADCAM_ENABLED = os.getenv("GRADCAM_ENABLED", "true").lower() == "true"
+GRADCAM_ON_REQUEST = os.getenv("GRADCAM_COMPUTE_ON_REQUEST", "true").lower() == "true"
 
 _models = {
     "biomarker": None,
@@ -123,10 +135,7 @@ async def global_exception_handler(request: Request, exc: Exception):
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000",
-        "http://127.0.0.1:3000",
-    ],
+    allow_origins=[origin.strip() for origin in CORS_ORIGINS],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -136,6 +145,39 @@ app.add_middleware(
 def _biomarker_to_array(bio: BiomarkerInput) -> np.ndarray:
     """Convert BiomarkerInput to a numpy array in the correct feature order."""
     return np.array([[getattr(bio, f) for f in FEATURE_ORDER]])
+
+
+async def _predict_cnn_async(image: np.ndarray) -> np.ndarray:
+    """Async wrapper for CNN prediction (GPU/CPU intensive)."""
+    loop = asyncio.get_event_loop()
+    def _predict():
+        return _models["cnn"].predict(np.expand_dims(image, axis=0), verbose=0)
+    return await loop.run_in_executor(None, _predict)
+
+
+async def _transform_biomarkers_async(X: np.ndarray) -> np.ndarray:
+    """Async wrapper for biomarker scaling."""
+    loop = asyncio.get_event_loop()
+    def _transform():
+        return _models["scaler"].transform(X)
+    return await loop.run_in_executor(None, _transform)
+
+
+async def _predict_biomarker_async(X: np.ndarray) -> np.ndarray:
+    """Async wrapper for biomarker model prediction."""
+    loop = asyncio.get_event_loop()
+    def _predict():
+        from src.models.biomarker_rf import predict_biomarker_proba
+        return predict_biomarker_proba(_models["biomarker"], X)
+    return await loop.run_in_executor(None, _predict)
+
+
+async def _generate_gradcam_async(image: np.ndarray, grade: int) -> tuple[str, str]:
+    """Async wrapper for Grad-CAM generation."""
+    loop = asyncio.get_event_loop()
+    def _gen_gradcam():
+        return _generate_gradcam_payload(image, grade)
+    return await loop.run_in_executor(None, _gen_gradcam)
 
 
 def _build_response(
