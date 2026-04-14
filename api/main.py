@@ -473,12 +473,24 @@ async def predict_image(file: UploadFile = File(...)):
     if len(contents) > MAX_FILE_SIZE_BYTES:
         raise HTTPException(status_code=413, detail=f"File exceeds {MAX_FILE_SIZE_MB}MB")
 
+    # Preprocess image
+    img_resized = _preprocess_image_for_inference(contents)
+    
+    # Run CNN prediction
+    cnn_proba = _models["cnn"].predict(np.expand_dims(img_resized, axis=0), verbose=0)
+    
+    # Compute grade and risk score
+    grade = int(np.argmax(cnn_proba[0]))
+    severity_weights = np.array([0.0, 0.25, 0.5, 0.75, 1.0])
+    risk_score = float(cnn_proba[0] @ severity_weights)
+    
+    # Generate Grad-CAM
     heatmap_b64, overlay_b64 = _generate_gradcam_payload(img_resized, grade)
 
     return _build_response(
         grade,
         risk_score,
-        pred,
+        cnn_proba[0],
         model_used="cnn",
         grad_cam_available=True,
         grad_cam_heatmap=heatmap_b64,

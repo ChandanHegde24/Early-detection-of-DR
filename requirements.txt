@@ -9,7 +9,7 @@ tensorflow==2.16.1
 keras==2.16.0
 
 # Machine Learning
-scikit-learn==1.5.0
+scikit-learn==1.3.2
 xgboost==2.0.3
 
 # Data Processing
