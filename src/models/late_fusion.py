@@ -76,10 +76,29 @@ def unified_prediction(
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Full late fusion pipeline: fuse → predict grade → compute risk score.
 
+    Includes clinical safety escalation for high-severity cases (Grade 3 Severe NPDR
+    and Grade 4 Proliferative DR).
+
     Returns:
         (predicted_grades, risk_scores, fused_probabilities)
     """
     fused = fuse_predictions(cnn_proba, biomarker_proba, cnn_weight, biomarker_weight)
     grades = get_predicted_grade(fused)
     scores = compute_risk_score(fused)
+
+    # Clinical Safety Priority:
+    # If either image or biomarkers detect sight-threatening pathology (Grade 3 or 4),
+    # ensure the patient is not misclassified as low risk.
+    for i in range(len(grades)):
+        cnn_g = int(np.argmax(cnn_proba[i]))
+        bio_g = int(np.argmax(biomarker_proba[i]))
+        max_g = max(cnn_g, bio_g)
+
+        if max_g >= 3 and (cnn_proba[i][max_g] > 0.35 or biomarker_proba[i][max_g] > 0.35):
+            grades[i] = max_g
+            min_score = 0.72 if max_g == 3 else 0.88
+            if scores[i] < min_score:
+                scores[i] = min_score
+
     return grades, scores, fused
+

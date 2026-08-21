@@ -3,7 +3,7 @@
 # ==============================================================
 
 paths:
-  raw_images: "data/raw/images"
+  raw_images: "raw_combined"
   raw_tabular: "data/raw/clinical_data.csv"
   processed_images: "data/processed/images"
   processed_tabular: "data/processed/clinical_data_clean.csv"
@@ -42,7 +42,7 @@ tabular:
   random_state: 42
 
 cnn:
-  backbone: "EfficientNetB0"    # Options: ResNet50, EfficientNetB0, EfficientNetB3
+  backbone: "MobileNetV2"       # Options: MobileNetV2, EfficientNetB0, ResNet50
   num_classes: 5
   learning_rate: 0.0001
   batch_size: 32

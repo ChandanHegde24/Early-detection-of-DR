@@ -1,0 +1,15 @@
+{
+  "backbone": "MobileNetV2",
+  "test_accuracy": 0.3766666650772095,
+  "test_loss": 1.5699573755264282,
+  "train_samples": 2400,
+  "val_samples": 300,
+  "test_samples": 300,
+  "class_weights": {
+    "0": 1.0,
+    "1": 1.0,
+    "2": 1.0,
+    "3": 1.0,
+    "4": 1.0
+  }
+}

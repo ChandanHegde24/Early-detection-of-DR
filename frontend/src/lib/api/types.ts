@@ -33,3 +33,28 @@ export type PredictionResponse = {
   grad_cam_heatmap: string | null;
   grad_cam_overlay: string | null;
 };
+
+export type BatchItemResult = {
+  patient_id: string;
+  age: number;
+  hba1c: number;
+  blood_pressure_systolic: number;
+  blood_pressure_diastolic: number;
+  bmi: number;
+  diabetes_duration_years: number;
+  risk_score: number;
+  screening_tier: "Urgent" | "Moderate" | "Low Risk" | string;
+  predicted_grade: number;
+  predicted_label: string;
+  baseline_recommendation?: string | null;
+};
+
+export type BatchPredictionResponse = {
+  total_patients: number;
+  urgent_count: number;
+  moderate_count: number;
+  low_risk_count: number;
+  avg_risk_score: number;
+  results: BatchItemResult[];
+};
+

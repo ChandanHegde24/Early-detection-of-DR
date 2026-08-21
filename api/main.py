@@ -11,7 +11,6 @@ Endpoints:
 import io
 import os
 import sys
-import asyncio
 import base64
 import logging
 import importlib
@@ -19,18 +18,14 @@ from pathlib import Path
 from contextlib import asynccontextmanager
 from typing import Optional
 
+from httpx import request
 import numpy as np
 import joblib
 import cv2
 from PIL import Image
-from fastapi import FastAPI, File, UploadFile, Form, HTTPException, Request
-from fastapi.responses import Response, JSONResponse
+from fastapi import FastAPI, File, UploadFile, Form, HTTPException
+from fastapi.responses import Response
 from fastapi.middleware.cors import CORSMiddleware
-from pythonjsonlogger import jsonlogger
-from dotenv import load_dotenv
-
-# Load environment variables
-load_dotenv()
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -47,6 +42,8 @@ from api.schemas import (
     PredictionResponse,
     GradeProbability,
     HealthResponse,
+    BatchItemResult,
+    BatchPredictionResponse,
 )
 from api.prioritization import (
     prioritize,
@@ -56,25 +53,8 @@ from api.prioritization import (
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-logHandler = logging.StreamHandler()
-formatter = jsonlogger.JsonFormatter(
-    '%(asctime)s %(levelname)s [%(name)s] [%(filename)s:%(lineno)d] - %(message)s'
-)
-logHandler.setFormatter(formatter)
-logger.handlers.clear()
-logger.addHandler(logHandler)
-
-MAX_FILE_SIZE_MB = int(os.getenv("MAX_FILE_SIZE_MB", "50"))
-MAX_FILE_SIZE_BYTES = MAX_FILE_SIZE_MB * 1024 * 1024
 
 settings = load_settings()
-
-# Load environment configuration
-CORS_ORIGINS = os.getenv("CORS_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000").split(",")
-TIER_URGENT = float(os.getenv("TIER_URGENT_THRESHOLD", "0.75"))
-TIER_MODERATE = float(os.getenv("TIER_MODERATE_THRESHOLD", "0.45"))
-GRADCAM_ENABLED = os.getenv("GRADCAM_ENABLED", "true").lower() == "true"
-GRADCAM_ON_REQUEST = os.getenv("GRADCAM_COMPUTE_ON_REQUEST", "true").lower() == "true"
 
 _models = {
     "biomarker": None,
@@ -86,36 +66,55 @@ DR_LABELS = ["No DR", "Mild NPDR", "Moderate NPDR", "Severe NPDR", "Proliferativ
 FEATURE_ORDER = settings["tabular"]["features"]
 
 
+_model_mtimes = {
+    "biomarker": 0.0,
+    "scaler": 0.0,
+    "cnn": 0.0,
+}
+
+
+def _ensure_models_loaded():
+    """Ensure all models are loaded in memory and reload if updated on disk."""
+    model_dir = settings["paths"]["saved_models"]
+    bio_path = os.path.join(model_dir, "biomarker_model.pkl")
+    scaler_path = os.path.join(model_dir, "biomarker_scaler.pkl")
+
+    if os.path.exists(bio_path):
+        mtime = os.path.getmtime(bio_path)
+        if _models["biomarker"] is None or mtime > _model_mtimes["biomarker"]:
+            try:
+                _models["biomarker"] = load_biomarker_model(bio_path)
+                _model_mtimes["biomarker"] = mtime
+                logger.info("Biomarker model loaded.")
+            except Exception as e:
+                logger.warning(f"Failed to load biomarker model: {e}")
+
+    if os.path.exists(scaler_path):
+        mtime = os.path.getmtime(scaler_path)
+        if _models["scaler"] is None or mtime > _model_mtimes["scaler"]:
+            try:
+                _models["scaler"] = joblib.load(scaler_path)
+                _model_mtimes["scaler"] = mtime
+                logger.info("Scaler loaded.")
+            except Exception as e:
+                logger.warning(f"Failed to load scaler: {e}")
+
+    if _models["cnn"] is None:
+        try:
+            _models["cnn"] = load_cnn_model()
+            logger.info("CNN model loaded successfully.")
+        except Exception as e:
+            logger.warning(f"Failed to load CNN: {e}")
+
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Load models at startup."""
-    model_dir = settings["paths"]["saved_models"]
-
-    bio_path = os.path.join(model_dir, "biomarker_model.pkl")
-    scaler_path = os.path.join(model_dir, "biomarker_scaler.pkl")
-    cnn_path = os.path.join(model_dir, "cnn_weights.weights.h5")
-
-    if not os.path.exists(bio_path):
-        raise RuntimeError(f"Critical: biomarker model missing at {bio_path}")
-    _models["biomarker"] = load_biomarker_model(bio_path)
-    logger.info("Biomarker model loaded.")
-
-    if not os.path.exists(scaler_path):
-        raise RuntimeError(f"Critical: scaler model missing at {scaler_path}")
-    _models["scaler"] = joblib.load(scaler_path)
-    logger.info("Scaler loaded.")
-
-    if not os.path.exists(cnn_path):
-        raise RuntimeError(f"Critical: cnn model missing at {cnn_path}")
-    try:
-        _models["cnn"] = load_cnn_model(cnn_path)
-        logger.info("CNN model loaded.")
-    except Exception as e:
-        raise RuntimeError(f"Failed to load CNN: {e}") from e
-
+    _ensure_models_loaded()
     yield
-
     _models.clear()
+
 
 
 app = FastAPI(
@@ -125,59 +124,25 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-@app.exception_handler(Exception)
-async def global_exception_handler(request: Request, exc: Exception):
-    logger.error(f"Unhandled exception: {exc}", exc_info=True)
-    return JSONResponse(
-        status_code=500,
-        content={"detail": "Internal server error"}
-    )
-
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[origin.strip() for origin in CORS_ORIGINS],
-    allow_credentials=True,
+    allow_origins=["*"],
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 
 def _biomarker_to_array(bio: BiomarkerInput) -> np.ndarray:
-    """Convert BiomarkerInput to a numpy array in the correct feature order."""
-    return np.array([[getattr(bio, f) for f in FEATURE_ORDER]])
-
-
-async def _predict_cnn_async(image: np.ndarray) -> np.ndarray:
-    """Async wrapper for CNN prediction (GPU/CPU intensive)."""
-    loop = asyncio.get_event_loop()
-    def _predict():
-        return _models["cnn"].predict(np.expand_dims(image, axis=0), verbose=0)
-    return await loop.run_in_executor(None, _predict)
-
-
-async def _transform_biomarkers_async(X: np.ndarray) -> np.ndarray:
-    """Async wrapper for biomarker scaling."""
-    loop = asyncio.get_event_loop()
-    def _transform():
-        return _models["scaler"].transform(X)
-    return await loop.run_in_executor(None, _transform)
-
-
-async def _predict_biomarker_async(X: np.ndarray) -> np.ndarray:
-    """Async wrapper for biomarker model prediction."""
-    loop = asyncio.get_event_loop()
-    def _predict():
-        from src.models.biomarker_rf import predict_biomarker_proba
-        return predict_biomarker_proba(_models["biomarker"], X)
-    return await loop.run_in_executor(None, _predict)
-
-
-async def _generate_gradcam_async(image: np.ndarray, grade: int) -> tuple[str, str]:
-    """Async wrapper for Grad-CAM generation."""
-    loop = asyncio.get_event_loop()
-    def _gen_gradcam():
-        return _generate_gradcam_payload(image, grade)
-    return await loop.run_in_executor(None, _gen_gradcam)
+    """Convert BiomarkerInput to a numpy array in the correct feature order (with engineered features)."""
+    base_vals = [float(getattr(bio, f)) for f in FEATURE_ORDER]
+    hba1c_duration = bio.hba1c * bio.diabetes_duration_years
+    bp_pulse = bio.blood_pressure_systolic - bio.blood_pressure_diastolic
+    chol_ratio = bio.cholesterol_total / (bio.cholesterol_hdl + 0.001)
+    high_risk_combo = 1.0 if (bio.hba1c > 8.0 and bio.diabetes_duration_years > 10) else 0.0
+    metabolic_score = bio.bmi * 0.3 + bio.triglycerides * 0.01 + bio.hba1c * 0.5
+    all_vals = base_vals + [hba1c_duration, bp_pulse, chol_ratio, high_risk_combo, metabolic_score]
+    return np.array([all_vals])
 
 
 def _build_response(
@@ -243,6 +208,7 @@ def _generate_gradcam_payload(
     overlay_b64 = _encode_image_to_data_url(overlay, mode="RGB")
     return heatmap_b64, overlay_b64
 
+
 def _extract_biomarkers_from_form(
     age: float,
     bmi: float,
@@ -275,25 +241,21 @@ def _extract_biomarkers_from_form(
 
 def _preprocess_image_for_inference(image_bytes: bytes) -> np.ndarray:
     """Apply Stage-2 preprocessing: crop + CLAHE + resize + normalization."""
-    try:
-        image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-        image_np = np.array(image, dtype=np.uint8)
-        image_np = crop_to_circle(image_np)
-        image_np = apply_clahe(image_np)
-        target = tuple(settings["image"]["target_size"])
-        image_np = cv2.resize(image_np, target, interpolation=cv2.INTER_AREA)       
-        return image_np.astype(np.float32) / 255.0
-    except (IOError, ValueError, OSError) as e:
-        logger.error(f"Image preprocessing failed: {e}", exc_info=True)
-        raise HTTPException(status_code=400, detail=f"Invalid or corrupted image: {str(e)[:100]}")
-    except Exception as e:
-        logger.error(f"Unexpected error in image preprocessing: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail="Image processing failed")
+    image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+    image_np = np.array(image, dtype=np.uint8)
+    image_np = crop_to_circle(image_np)
+    image_np = apply_clahe(image_np)
+    target = tuple(settings["image"]["target_size"])
+    image_np = cv2.resize(image_np, target, interpolation=cv2.INTER_AREA)
+    return image_np.astype(np.float32) / 255.0
+
+
 def _predict_unified_from_inputs(
     image_bytes: bytes,
     biomarkers: BiomarkerInput,
     include_gradcam: bool = True,
 ) -> PredictionResponse:
+    _ensure_models_loaded()
     if _models["cnn"] is None or _models["biomarker"] is None:
         raise HTTPException(status_code=503, detail="Both models must be loaded for unified prediction.")
 
@@ -424,6 +386,7 @@ def _build_clinical_report_pdf(response: PredictionResponse, biomarkers: Biomark
 @app.get("/health", response_model=HealthResponse)
 async def health_check():
     """Check API status and which models are loaded."""
+    _ensure_models_loaded()
     return HealthResponse(
         status="healthy",
         models_loaded={
@@ -437,11 +400,23 @@ async def health_check():
 @app.post("/predict/biomarker", response_model=PredictionResponse)
 async def predict_biomarker(request: PredictionRequest):
     """Predict DR from clinical biomarkers only."""
+    _ensure_models_loaded()
     if _models["biomarker"] is None:
         raise HTTPException(status_code=503, detail="Biomarker model not loaded.")
 
-    X = _biomarker_to_array(request.biomarkers)
-
+    import pandas as pd
+    b = request.biomarkers
+    df = pd.DataFrame([b.model_dump()])
+    df["hba1c_duration"]  = df["hba1c"] * df["diabetes_duration_years"]
+    df["bp_pulse"]        = df["blood_pressure_systolic"] - df["blood_pressure_diastolic"]
+    df["chol_ratio"]      = df["cholesterol_total"] / (df["cholesterol_hdl"] + 0.001)
+    df["high_risk_combo"] = ((df["hba1c"] > 8.0) & (df["diabetes_duration_years"] > 10)).astype(int)
+    df["metabolic_score"] = df["bmi"] * 0.3 + df["triglycerides"] * 0.01 + df["hba1c"] * 0.5
+    FEATURE_COLS = ["age","bmi","hba1c","blood_pressure_systolic","blood_pressure_diastolic",
+                    "cholesterol_total","cholesterol_hdl","cholesterol_ldl","triglycerides",
+                    "diabetes_duration_years","smoking_status","family_history_dr",
+                    "hba1c_duration","bp_pulse","chol_ratio","high_risk_combo","metabolic_score"]
+    X = df[FEATURE_COLS].values
     if _models["scaler"] is not None:
         X = _models["scaler"].transform(X)
 
@@ -463,39 +438,176 @@ async def predict_biomarker(request: PredictionRequest):
     )
 
 
+@app.post("/predict/batch", response_model=BatchPredictionResponse)
+async def predict_batch(file: UploadFile = File(...)):
+    """Process a batch of patient records from a real CSV file."""
+    _ensure_models_loaded()
+    if _models["biomarker"] is None:
+        raise HTTPException(status_code=503, detail="Biomarker model not loaded.")
+
+    import pandas as pd
+    contents = await file.read()
+    try:
+        df = pd.read_csv(io.BytesIO(contents))
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Invalid CSV file format: {e}")
+
+    # Standardize column names (lowercase, stripped)
+    df.columns = [c.strip().lower() for c in df.columns]
+
+    # Required base columns with defaults if optional
+    field_aliases = {
+        "age": ["age", "patient_age"],
+        "bmi": ["bmi", "body_mass_index"],
+        "hba1c": ["hba1c", "a1c", "glycated_hemoglobin"],
+        "blood_pressure_systolic": ["blood_pressure_systolic", "systolic_bp", "sbp", "bp_sys"],
+        "blood_pressure_diastolic": ["blood_pressure_diastolic", "diastolic_bp", "dbp", "bp_dia"],
+        "cholesterol_total": ["cholesterol_total", "total_cholesterol", "chol_tot", "cholesterol"],
+        "cholesterol_hdl": ["cholesterol_hdl", "hdl_cholesterol", "hdl"],
+        "cholesterol_ldl": ["cholesterol_ldl", "ldl_cholesterol", "ldl"],
+        "triglycerides": ["triglycerides", "triglyceride", "tg"],
+        "diabetes_duration_years": ["diabetes_duration_years", "diabetes_duration", "duration_years", "duration"],
+        "smoking_status": ["smoking_status", "smoking", "smoker"],
+        "family_history_dr": ["family_history_dr", "family_history", "fam_hist"],
+    }
+
+    # Map columns
+    mapped_cols = {}
+    for target, aliases in field_aliases.items():
+        matched = False
+        for a in aliases:
+            if a in df.columns:
+                mapped_cols[target] = a
+                matched = True
+                break
+        if not matched:
+            # Fallback defaults for missing columns
+            defaults = {
+                "age": 55.0, "bmi": 27.0, "hba1c": 6.5, "blood_pressure_systolic": 130.0,
+                "blood_pressure_diastolic": 80.0, "cholesterol_total": 200.0, "cholesterol_hdl": 50.0,
+                "cholesterol_ldl": 120.0, "triglycerides": 150.0, "diabetes_duration_years": 5.0,
+                "smoking_status": 0, "family_history_dr": 0,
+            }
+            df[target] = defaults[target]
+            mapped_cols[target] = target
+
+    # Rename to canonical
+    rename_dict = {orig: target for target, orig in mapped_cols.items() if orig != target and orig in df.columns}
+    df = df.rename(columns=rename_dict)
+
+    # Compute engineered features
+    df["hba1c_duration"]  = df["hba1c"] * df["diabetes_duration_years"]
+    df["bp_pulse"]        = df["blood_pressure_systolic"] - df["blood_pressure_diastolic"]
+    df["chol_ratio"]      = df["cholesterol_total"] / (df["cholesterol_hdl"] + 0.001)
+    df["high_risk_combo"] = ((df["hba1c"] > 8.0) & (df["diabetes_duration_years"] > 10)).astype(int)
+    df["metabolic_score"] = df["bmi"] * 0.3 + df["triglycerides"] * 0.01 + df["hba1c"] * 0.5
+
+    FEATURE_COLS = ["age","bmi","hba1c","blood_pressure_systolic","blood_pressure_diastolic",
+                    "cholesterol_total","cholesterol_hdl","cholesterol_ldl","triglycerides",
+                    "diabetes_duration_years","smoking_status","family_history_dr",
+                    "hba1c_duration","bp_pulse","chol_ratio","high_risk_combo","metabolic_score"]
+
+    X = df[FEATURE_COLS].values
+    if _models["scaler"] is not None:
+        X = _models["scaler"].transform(X)
+
+    probas = predict_biomarker_proba(_models["biomarker"], X)
+    severity_weights = np.array([0.0, 0.25, 0.5, 0.75, 1.0])
+    risk_scores = probas @ severity_weights
+
+    results: List[BatchItemResult] = []
+    urgent_count = 0
+    moderate_count = 0
+    low_risk_count = 0
+
+    id_col = "patient_id" if "patient_id" in df.columns else ("id" if "id" in df.columns else None)
+
+    for i, row in df.iterrows():
+        p_id = str(row[id_col]) if id_col else f"PAT-{i+1:04d}"
+        r_score = float(risk_scores[i])
+        grade = int(np.argmax(probas[i]))
+        tier, _, grade_label = prioritize(r_score, grade)
+
+        if tier == "Urgent":
+            urgent_count += 1
+        elif tier == "Moderate":
+            moderate_count += 1
+        else:
+            low_risk_count += 1
+
+        b_inp = BiomarkerInput(
+            age=float(row["age"]),
+            bmi=float(row["bmi"]),
+            hba1c=float(row["hba1c"]),
+            blood_pressure_systolic=float(row["blood_pressure_systolic"]),
+            blood_pressure_diastolic=float(row["blood_pressure_diastolic"]),
+            cholesterol_total=float(row["cholesterol_total"]),
+            cholesterol_hdl=float(row["cholesterol_hdl"]),
+            cholesterol_ldl=float(row["cholesterol_ldl"]),
+            triglycerides=float(row["triglycerides"]),
+            diabetes_duration_years=float(row["diabetes_duration_years"]),
+            smoking_status=int(row["smoking_status"]),
+            family_history_dr=int(row["family_history_dr"]),
+        )
+        b_score, _ = compute_clinical_rule_score(b_inp)
+        rec = clinical_recommendation_from_score(b_score)
+
+        results.append(BatchItemResult(
+            patient_id=p_id,
+            age=float(row["age"]),
+            hba1c=float(row["hba1c"]),
+            blood_pressure_systolic=float(row["blood_pressure_systolic"]),
+            blood_pressure_diastolic=float(row["blood_pressure_diastolic"]),
+            bmi=float(row["bmi"]),
+            diabetes_duration_years=float(row["diabetes_duration_years"]),
+            risk_score=round(r_score, 4),
+            screening_tier=tier,
+            predicted_grade=grade,
+            predicted_label=grade_label,
+            baseline_recommendation=rec,
+        ))
+
+    # Sort results by risk score descending
+    results.sort(key=lambda x: x.risk_score, reverse=True)
+
+    avg_score = float(np.mean(risk_scores)) if len(risk_scores) > 0 else 0.0
+
+    return BatchPredictionResponse(
+        total_patients=len(results),
+        urgent_count=urgent_count,
+        moderate_count=moderate_count,
+        low_risk_count=low_risk_count,
+        avg_risk_score=round(avg_score, 4),
+        results=results,
+    )
+
+
 @app.post("/predict/image", response_model=PredictionResponse)
 async def predict_image(file: UploadFile = File(...)):
     """Predict DR from a retinal fundus image only."""
+    _ensure_models_loaded()
     if _models["cnn"] is None:
         raise HTTPException(status_code=503, detail="CNN model not loaded.")
 
     contents = await file.read()
-    if len(contents) > MAX_FILE_SIZE_BYTES:
-        raise HTTPException(status_code=413, detail=f"File exceeds {MAX_FILE_SIZE_MB}MB")
-
-    # Preprocess image
     img_resized = _preprocess_image_for_inference(contents)
-    
-    # Run CNN prediction
-    cnn_proba = _models["cnn"].predict(np.expand_dims(img_resized, axis=0), verbose=0)
-    
-    # Compute grade and risk score
-    grade = int(np.argmax(cnn_proba[0]))
+
+    pred = _models["cnn"].predict(np.expand_dims(img_resized, axis=0), verbose=0)[0]
+    grade = int(np.argmax(pred))
     severity_weights = np.array([0.0, 0.25, 0.5, 0.75, 1.0])
-    risk_score = float(cnn_proba[0] @ severity_weights)
-    
-    # Generate Grad-CAM
+    risk_score = float(pred @ severity_weights)
     heatmap_b64, overlay_b64 = _generate_gradcam_payload(img_resized, grade)
 
     return _build_response(
         grade,
         risk_score,
-        cnn_proba[0],
+        pred,
         model_used="cnn",
         grad_cam_available=True,
         grad_cam_heatmap=heatmap_b64,
         grad_cam_overlay=overlay_b64,
     )
+
 
 @app.post("/predict/unified", response_model=PredictionResponse)
 async def predict_unified(
@@ -515,9 +627,6 @@ async def predict_unified(
 ):
     """Predict DR using both image + biomarkers (late fusion)."""
     contents = await file.read()
-    if len(contents) > MAX_FILE_SIZE_BYTES:
-        raise HTTPException(status_code=413, detail=f"File exceeds {MAX_FILE_SIZE_MB}MB")
-
     bio = _extract_biomarkers_from_form(
         age,
         bmi,
@@ -553,8 +662,6 @@ async def predict_unified_report(
 ):
     """Run unified prediction and return a downloadable clinical PDF report."""
     contents = await file.read()
-    if len(contents) > MAX_FILE_SIZE_BYTES:
-        raise HTTPException(status_code=413, detail=f"File exceeds {MAX_FILE_SIZE_MB}MB")
     bio = _extract_biomarkers_from_form(
         age,
         bmi,

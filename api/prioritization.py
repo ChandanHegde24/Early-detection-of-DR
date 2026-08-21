@@ -118,20 +118,26 @@ def clinical_recommendation_from_score(score: float) -> str:
     return "Baseline risk below high-risk cutoff. Continue routine monitoring and scheduled screening."
 
 
-def classify_tier(risk_score: float) -> str:
-    """Map a continuous risk score to a screening tier.
+def classify_tier(risk_score: float, predicted_grade: int = 0) -> str:
+    """Map a continuous risk score and detected DR grade to a clinical screening tier.
 
     Args:
-        risk_score: Value in [0, 1] from the late fusion model.
+        risk_score: Value in [0, 1] from the late fusion / biomarker model.
+        predicted_grade: Integer DR grade (0=No DR, 1=Mild, 2=Moderate, 3=Severe, 4=Proliferative).
 
     Returns:
         One of 'Urgent', 'Moderate', or 'Low Risk'.
     """
-    thresholds = settings["prioritization"]["thresholds"]
+    thresholds = settings.get("prioritization", {}).get("thresholds", {"urgent": 0.65, "moderate": 0.38, "low": 0.0})
+    urgent_thresh = float(thresholds.get("urgent", 0.65))
+    mod_thresh = float(thresholds.get("moderate", 0.38))
 
-    if risk_score >= thresholds["urgent"]:
+    # Severe (3) or Proliferative (4) requires immediate ophthalmologist referral
+    if predicted_grade >= 3 or risk_score >= urgent_thresh:
         return "Urgent"
-    elif risk_score >= thresholds["moderate"]:
+    elif predicted_grade >= 2 or risk_score >= mod_thresh:
+        return "Moderate"
+    elif predicted_grade == 1 and risk_score >= 0.30:
         return "Moderate"
     else:
         return "Low Risk"
@@ -153,7 +159,8 @@ def prioritize(risk_score: float, predicted_grade: int) -> Tuple[str, str, str]:
     Returns:
         (tier, tier_description, grade_label)
     """
-    tier = classify_tier(risk_score)
+    tier = classify_tier(risk_score, predicted_grade)
     description = get_tier_description(tier)
     grade_label = get_grade_label(predicted_grade)
     return tier, description, grade_label
+

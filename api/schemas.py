@@ -1,34 +1,26 @@
 """
 Pydantic schemas defining the API request/response data formats.
-Enhanced with stricter validation.
 """
 
 from typing import List, Optional, Dict
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field
+
 
 
 class BiomarkerInput(BaseModel):
-    """Clinical biomarker data for a single patient with realistic ranges."""
-    age: float = Field(..., ge=18, le=100, description="Patient age in years (18-100)")
-    bmi: float = Field(..., ge=12, le=65, description="Body Mass Index (12-65)")
-    hba1c: float = Field(..., ge=4.0, le=15.0, description="HbA1c level (%) (4-15)")
-    blood_pressure_systolic: float = Field(..., ge=70, le=240, description="Systolic BP (mmHg) (70-240)")
-    blood_pressure_diastolic: float = Field(..., ge=40, le=150, description="Diastolic BP (mmHg) (40-150)")
-    cholesterol_total: float = Field(..., ge=100, le=400, description="Total cholesterol (mg/dL) (100-400)")
-    cholesterol_hdl: float = Field(..., ge=20, le=120, description="HDL cholesterol (mg/dL) (20-120)")
-    cholesterol_ldl: float = Field(..., ge=20, le=350, description="LDL cholesterol (mg/dL) (20-350)")
-    triglycerides: float = Field(..., ge=30, le=800, description="Triglycerides (mg/dL) (30-800)")
-    diabetes_duration_years: float = Field(..., ge=0, le=70, description="Years since diabetes diagnosis (0-70)")
+    """Clinical biomarker data for a single patient."""
+    age: float = Field(..., ge=0, le=120, description="Patient age in years")
+    bmi: float = Field(..., ge=10, le=70, description="Body Mass Index")
+    hba1c: float = Field(..., ge=3.0, le=20.0, description="HbA1c level (%)")
+    blood_pressure_systolic: float = Field(..., ge=60, le=250, description="Systolic BP (mmHg)")
+    blood_pressure_diastolic: float = Field(..., ge=30, le=150, description="Diastolic BP (mmHg)")
+    cholesterol_total: float = Field(..., ge=50, le=500, description="Total cholesterol (mg/dL)")
+    cholesterol_hdl: float = Field(..., ge=10, le=150, description="HDL cholesterol (mg/dL)")
+    cholesterol_ldl: float = Field(..., ge=10, le=400, description="LDL cholesterol (mg/dL)")
+    triglycerides: float = Field(..., ge=30, le=1000, description="Triglycerides (mg/dL)")
+    diabetes_duration_years: float = Field(..., ge=0, le=80, description="Years since diabetes diagnosis")
     smoking_status: int = Field(..., ge=0, le=2, description="0=Never, 1=Former, 2=Current")
     family_history_dr: int = Field(..., ge=0, le=1, description="0=No, 1=Yes")
-
-    @field_validator('cholesterol_total')
-    @classmethod
-    def validate_cholesterol(cls, v, info):
-        """Ensure total cholesterol > HDL + LDL minimum."""
-        if v < 50:
-            raise ValueError('Total cholesterol must be at least 50 mg/dL')
-        return v
 
 
 class PredictionRequest(BaseModel):
@@ -42,6 +34,7 @@ class GradeProbability(BaseModel):
     grade: int = Field(..., description="DR grade (0-4)")
     label: str = Field(..., description="Human-readable grade label")
     probability: float = Field(..., ge=0.0, le=1.0)
+
 
 class PredictionResponse(BaseModel):
     """Unified prediction response from the AI system."""
@@ -79,7 +72,35 @@ class PredictionResponse(BaseModel):
         description="Optional base64 data URL for overlay of heatmap on fundus image",
     )
 
+
 class HealthResponse(BaseModel):
     """Health check response."""
     status: str
     models_loaded: dict
+
+
+class BatchItemResult(BaseModel):
+    """Single patient result in a batch."""
+    patient_id: str
+    age: float
+    hba1c: float
+    blood_pressure_systolic: float
+    blood_pressure_diastolic: float
+    bmi: float
+    diabetes_duration_years: float
+    risk_score: float
+    screening_tier: str
+    predicted_grade: int
+    predicted_label: str
+    baseline_recommendation: Optional[str] = None
+
+
+class BatchPredictionResponse(BaseModel):
+    """Aggregated batch prediction response."""
+    total_patients: int
+    urgent_count: int
+    moderate_count: int
+    low_risk_count: int
+    avg_risk_score: float
+    results: List[BatchItemResult]
+

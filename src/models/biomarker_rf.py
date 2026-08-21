@@ -1,129 +1,162 @@
 """
-Biomarker-based risk prediction model using XGBoost or Random Forest.
+biomarker_rf.py — Multi-Class Clinical Biomarker Stacking Ensemble
+Classes:
+  0: No DR
+  1: Mild NPDR
+  2: Moderate NPDR
+  3: Severe NPDR
+  4: Proliferative DR
 
-Trains on clinical tabular data (HbA1c, blood pressure, cholesterol, etc.)
-to predict the DR severity grade (0–4).
+Stacking: XGBoost + HistGradientBoosting + ExtraTrees + RandomForest → Multinomial Logistic Meta
 """
-
-from typing import Optional, Tuple
-
+import os
+from typing import Tuple, Optional
 import numpy as np
 import joblib
-from sklearn.ensemble import RandomForestClassifier
+from sklearn.ensemble import (
+    RandomForestClassifier,
+    ExtraTreesClassifier,
+    HistGradientBoostingClassifier,
+    StackingClassifier,
+)
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import accuracy_score, classification_report
+from sklearn.model_selection import StratifiedKFold, cross_val_score
 from xgboost import XGBClassifier
-from sklearn.metrics import classification_report, accuracy_score
 
-from src.config import load_settings
+try:
+    from lightgbm import LGBMClassifier
+    has_lgbm = True
+except ImportError:
+    has_lgbm = False
 
-settings = load_settings()
+try:
+    from src.config import load_settings
+    settings = load_settings()
+except Exception:
+    settings = {
+        "biomarker_model": {"type": "stacking", "random_state": 42},
+        "paths": {"saved_models": "saved_models"},
+    }
 
-
-def build_biomarker_model(model_type: Optional[str] = None) -> object:
-    """Create an XGBoost or Random Forest classifier based on settings.
-
-    Args:
-        model_type: 'xgboost' or 'random_forest'. Defaults to settings value.
-
-    Returns:
-        A scikit-learn compatible classifier instance.
-    """
-    cfg = settings["biomarker_model"]
-    model_type = model_type or cfg["type"]
-
-    if model_type == "xgboost":
-        return XGBClassifier(
-            n_estimators=cfg["n_estimators"],
-            max_depth=cfg["max_depth"],
-            learning_rate=cfg["learning_rate"],
-            random_state=cfg["random_state"],
-            use_label_encoder=False,
-            eval_metric="mlogloss",
-            objective="multi:softproba",
-        )
-    elif model_type == "random_forest":
-        return RandomForestClassifier(
-            n_estimators=cfg["n_estimators"],
-            max_depth=cfg["max_depth"],
-            random_state=cfg["random_state"],
-            n_jobs=-1,
-        )
-    else:
-        raise ValueError(f"Unsupported model type: {model_type}")
+DEFAULT_MODEL_PATH = "saved_models/biomarker_model.pkl"
+CLASS_NAMES = ["No DR (0)", "Mild NPDR (1)", "Moderate NPDR (2)", "Severe NPDR (3)", "Proliferative DR (4)"]
 
 
-def train_biomarker_model(
-    X_train: np.ndarray,
-    y_train: np.ndarray,
-    X_val: Optional[np.ndarray] = None,
-    y_val: Optional[np.ndarray] = None,
-    model_type: Optional[str] = None,
-) -> object:
-    """Train the biomarker model.
+def build_stacking_ensemble(random_state: int = 42) -> StackingClassifier:
+    """Build multi-class stacking ensemble for 5-grade DR prediction."""
+    estimators = []
 
-    Args:
-        X_train: Training feature matrix.
-        y_train: Training labels.
-        X_val: Optional validation features (used for early stopping with XGBoost).
-        y_val: Optional validation labels.
-        model_type: Override the model type from settings.
+    # 1. XGBoost Multi-class
+    xgb = XGBClassifier(
+        n_estimators=300,
+        max_depth=5,
+        learning_rate=0.05,
+        subsample=0.85,
+        colsample_bytree=0.85,
+        min_child_weight=2,
+        gamma=0.05,
+        verbosity=0,
+        eval_metric="mlogloss",
+        random_state=random_state,
+    )
+    estimators.append(("xgb", xgb))
 
-    Returns:
-        Trained classifier.
-    """
-    model = build_biomarker_model(model_type)
+    # 2. HistGradientBoosting Multi-class
+    hgb = HistGradientBoostingClassifier(
+        max_iter=300,
+        max_depth=6,
+        learning_rate=0.05,
+        min_samples_leaf=15,
+        random_state=random_state,
+    )
+    estimators.append(("hgb", hgb))
 
-    cfg = settings["biomarker_model"]
-    model_type = model_type or cfg["type"]
+    # 3. Extra Trees Multi-class
+    et = ExtraTreesClassifier(
+        n_estimators=250,
+        max_depth=12,
+        min_samples_leaf=2,
+        class_weight="balanced",
+        random_state=random_state,
+        n_jobs=-1,
+    )
+    estimators.append(("et", et))
 
-    if model_type == "xgboost" and X_val is not None and y_val is not None:
-        model.fit(
-            X_train, y_train,
-            eval_set=[(X_val, y_val)],
-            verbose=False,
-        )
-    else:
-        model.fit(X_train, y_train)
+    # 4. Random Forest Multi-class
+    rf = RandomForestClassifier(
+        n_estimators=250,
+        max_depth=10,
+        min_samples_leaf=2,
+        class_weight="balanced",
+        random_state=random_state,
+        n_jobs=-1,
+    )
+    estimators.append(("rf", rf))
 
+    return StackingClassifier(
+        estimators=estimators,
+        final_estimator=LogisticRegression(C=1.0, max_iter=1000, multi_class="multinomial"),
+        cv=3,
+        stack_method="predict_proba",
+        n_jobs=-1,
+    )
+
+
+def train_biomarker_model(X_train, y_train, X_test, y_test):
+    """Train 5-class stacking ensemble with cross-validation."""
+    rs = settings.get("biomarker_model", {}).get("random_state", 42)
+    model = build_stacking_ensemble(rs)
+    cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=rs)
+    cv_scores = cross_val_score(model, X_train, y_train, cv=cv, scoring="accuracy", n_jobs=-1)
+    print(f"  5-Fold CV Accuracy: {cv_scores.mean()*100:.2f}% ± {cv_scores.std()*100:.2f}%")
+    model.fit(X_train, y_train)
     return model
 
 
-def evaluate_biomarker_model(
-    model: object,
-    X_test: np.ndarray,
-    y_test: np.ndarray,
-) -> Tuple[float, str]:
-    """Evaluate the model and return accuracy + classification report.
-
-    Returns:
-        (accuracy, classification_report_string)
-    """
+def evaluate_biomarker_model(model, X_test, y_test) -> Tuple[float, str]:
+    """Evaluate on 5 DR severity grades."""
     y_pred = model.predict(X_test)
     acc = accuracy_score(y_test, y_pred)
-    report = classification_report(
-        y_test, y_pred,
-        target_names=["No DR", "Mild", "Moderate", "Severe", "Proliferative"],
-        zero_division=0,
-    )
+    report = classification_report(y_test, y_pred, target_names=CLASS_NAMES, digits=4)
     return acc, report
 
 
-def predict_biomarker_proba(model: object, X: np.ndarray) -> np.ndarray:
-    """Return class probability predictions.
+def predict_biomarker_proba(model, X: np.ndarray) -> np.ndarray:
+    """Returns true 5-class calibrated probability array [p0, p1, p2, p3, p4].
+
+    Args:
+        model: Trained multi-class classifier or StackingClassifier
+        X: Feature matrix of shape (n_samples, n_features)
 
     Returns:
-        Array of shape (n_samples, n_classes) with probability estimates.
+        Probability array of shape (n_samples, 5)
     """
-    return model.predict_proba(X)
+    proba = model.predict_proba(X)
+    # Ensure shape is (n_samples, 5)
+    if proba.shape[1] < 5:
+        padded = np.zeros((proba.shape[0], 5))
+        padded[:, :proba.shape[1]] = proba
+        return padded
+    return proba
 
 
-def save_biomarker_model(model: object, path: Optional[str] = None) -> str:
-    """Serialize and save the trained model to disk."""
-    path = path or f"{settings['paths']['saved_models']}/biomarker_model.pkl"
+def save_biomarker_model(model, path: str = DEFAULT_MODEL_PATH) -> str:
+    os.makedirs(os.path.dirname(path), exist_ok=True)
     joblib.dump(model, path)
+    print(f"[biomarker_rf] Multi-Class Model saved → {path}")
     return path
 
 
-def load_biomarker_model(path: Optional[str] = None) -> object:
-    """Load a previously saved biomarker model from disk."""
-    path = path or f"{settings['paths']['saved_models']}/biomarker_model.pkl"
-    return joblib.load(path)
+def load_biomarker_model(path: Optional[str] = None):
+    path = path or DEFAULT_MODEL_PATH
+    if not os.path.exists(path):
+        raise FileNotFoundError(
+            f"No trained model found at '{path}'.\n"
+            "Run this first:  python -m src.pipeline.train --model biomarker --force\n"
+            "Then restart the backend."
+        )
+    model = joblib.load(path)
+    print(f"[biomarker_rf] Multi-Class Model loaded from {path}")
+    return model
+

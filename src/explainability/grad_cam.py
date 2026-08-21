@@ -11,45 +11,35 @@ from typing import Optional, Tuple
 import cv2
 import numpy as np
 import tensorflow as tf
-import keras
-from keras import Model
+from tensorflow import keras
+from tensorflow.keras import Model
 
 from src.config import load_settings
 
 settings = load_settings()
 
 
+def find_base_model(model: Model) -> Optional[Model]:
+    """Find nested backbone Model in the outer Model."""
+    for l in model.layers:
+        if isinstance(l, Model):
+            return l
+    return None
+
+
 def find_target_layer(model: Model) -> str:
-    """Automatically find the last convolutional layer in the model.
+    """Automatically find the last convolutional layer in the model."""
+    base_model = find_base_model(model)
+    if base_model is not None:
+        for layer in reversed(base_model.layers):
+            if "conv" in layer.name or isinstance(layer, keras.layers.Conv2D):
+                return layer.name
 
-    Searches through the model (and any nested sub-models) to find the
-    last Conv2D layer, which typically produces the best Grad-CAM results.
-
-    Returns:
-        Name of the last convolutional layer.
-    """
     for layer in reversed(model.layers):
-        if isinstance(layer, Model):
-            for sub_layer in reversed(layer.layers):
-                if isinstance(sub_layer, keras.layers.Conv2D):
-                    return sub_layer.name
-        if isinstance(layer, keras.layers.Conv2D):
+        if "conv" in layer.name or isinstance(layer, keras.layers.Conv2D):
             return layer.name
 
-    raise ValueError("No Conv2D layer found in the model.")
-
-
-def _get_nested_layer(model: Model, layer_name: str):
-    """Retrieve a layer by name, searching nested sub-models."""
-    for layer in model.layers:
-        if layer.name == layer_name:
-            return layer
-        if isinstance(layer, Model):
-            try:
-                return layer.get_layer(layer_name)
-            except ValueError:
-                continue
-    raise ValueError(f"Layer '{layer_name}' not found in model.")
+    return "top_conv"
 
 
 def generate_grad_cam(
@@ -58,57 +48,66 @@ def generate_grad_cam(
     target_class: Optional[int] = None,
     layer_name: Optional[str] = None,
 ) -> np.ndarray:
-    """Generate a Grad-CAM heatmap for a given image and model.
-
-    Args:
-        model: Trained Keras model.
-        image: Preprocessed image array of shape (H, W, 3), values in [0, 1].
-        target_class: Class index to explain. If None, uses the predicted class.
-        layer_name: Name of the Conv2D layer to use. Auto-detected if None.
-
-    Returns:
-        Heatmap array of shape (H, W) with values in [0, 1].
-    """
-    layer_name = layer_name or find_target_layer(model)
-
+    """Generate a Grad-CAM heatmap for a given image and model."""
     img_tensor = tf.expand_dims(tf.cast(image, tf.float32), axis=0)
 
-    base_model = None
-    for layer in model.layers:
-        if isinstance(layer, Model):
-            try:
-                layer.get_layer(layer_name)
-                base_model = layer
-                break
-            except ValueError:
-                continue
-
+    base_model = find_base_model(model)
     if base_model is not None:
-        conv_layer = base_model.get_layer(layer_name)
-        grad_model = Model(
-            inputs=model.input,
-            outputs=[base_model.get_layer(layer_name).output, model.output],
-        )
-    else:
-        grad_model = Model(
-            inputs=model.input,
-            outputs=[model.get_layer(layer_name).output, model.output],
-        )
+        base_idx = model.layers.index(base_model)
+        layer_name = layer_name or find_target_layer(model)
+        
+        try:
+            last_conv_layer = base_model.get_layer(layer_name)
+        except Exception:
+            last_conv_layer = [l for l in base_model.layers if "conv" in l.name][-1]
+
+        # Pass image through layers before base_model (e.g. Rescaling)
+        intermediate_tensor = img_tensor
+        for l in model.layers[1:base_idx]:
+            intermediate_tensor = l(intermediate_tensor)
+
+        last_conv_model = keras.Model(base_model.inputs, last_conv_layer.output)
+
+        classifier_input = keras.Input(shape=last_conv_layer.output.shape[1:])
+        x = classifier_input
+        for layer in model.layers[base_idx + 1:]:
+            x = layer(x)
+        classifier_model = keras.Model(classifier_input, x)
+
+        with tf.GradientTape() as tape:
+            conv_outputs = last_conv_model(intermediate_tensor)
+            tape.watch(conv_outputs)
+            predictions = classifier_model(conv_outputs)
+            if target_class is None:
+                target_class = int(tf.argmax(predictions[0]))
+            class_output = predictions[:, target_class]
+
+        grads = tape.gradient(class_output, conv_outputs)
+        pooled_grads = tf.reduce_mean(grads, axis=(0, 1, 2))
+        conv_outputs = conv_outputs[0]
+        heatmap = conv_outputs @ pooled_grads[..., tf.newaxis]
+        heatmap = tf.squeeze(heatmap)
+        heatmap = tf.maximum(heatmap, 0) / (tf.math.reduce_max(heatmap) + 1e-8)
+        return heatmap.numpy()
+
+    # Fallback for flat models
+    layer_name = layer_name or find_target_layer(model)
+    grad_model = Model(
+        inputs=model.input,
+        outputs=[model.get_layer(layer_name).output, model.output],
+    )
 
     with tf.GradientTape() as tape:
         conv_outputs, predictions = grad_model(img_tensor)
         if target_class is None:
-            target_class = tf.argmax(predictions[0])
+            target_class = int(tf.argmax(predictions[0]))
         class_output = predictions[:, target_class]
 
     grads = tape.gradient(class_output, conv_outputs)
-
     pooled_grads = tf.reduce_mean(grads, axis=(0, 1, 2))
-
     conv_outputs = conv_outputs[0]
     heatmap = conv_outputs @ pooled_grads[..., tf.newaxis]
     heatmap = tf.squeeze(heatmap)
-
     heatmap = tf.maximum(heatmap, 0) / (tf.math.reduce_max(heatmap) + 1e-8)
     return heatmap.numpy()
 
@@ -119,17 +118,7 @@ def overlay_heatmap(
     alpha: float = 0.4,
     colormap: int = cv2.COLORMAP_JET,
 ) -> np.ndarray:
-    """Overlay a Grad-CAM heatmap on the original image.
-
-    Args:
-        image: Original image of shape (H, W, 3), values in [0, 1] or [0, 255].
-        heatmap: Grad-CAM heatmap of shape (h, w), values in [0, 1].
-        alpha: Blending factor (0 = only image, 1 = only heatmap).
-        colormap: OpenCV colormap for the heatmap visualization.
-
-    Returns:
-        Blended image of shape (H, W, 3) as uint8 in [0, 255].
-    """
+    """Overlay a Grad-CAM heatmap on the original image."""
     if image.max() <= 1.0:
         image = (image * 255).astype(np.uint8)
 
@@ -142,6 +131,7 @@ def overlay_heatmap(
     overlay = cv2.addWeighted(image, 1 - alpha, heatmap_colored, alpha, 0)
     return overlay
 
+
 def explain_prediction(
     model: Model,
     image: np.ndarray,
@@ -149,11 +139,7 @@ def explain_prediction(
     layer_name: Optional[str] = None,
     alpha: float = 0.4,
 ) -> Tuple[np.ndarray, np.ndarray, int, float]:
-    """Full Grad-CAM explanation pipeline.
-
-    Returns:
-        (overlay_image, heatmap, predicted_class, predicted_confidence)
-    """
+    """Full Grad-CAM explanation pipeline."""
     img_tensor = tf.expand_dims(tf.cast(image, tf.float32), axis=0)
     predictions = model.predict(img_tensor, verbose=0)[0]
     predicted_class = int(np.argmax(predictions))
