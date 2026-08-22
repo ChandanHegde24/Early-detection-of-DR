@@ -9,9 +9,9 @@ from pydantic import BaseModel, Field
 
 class BiomarkerInput(BaseModel):
     """Clinical biomarker data for a single patient."""
-    age: float = Field(..., ge=0, le=120, description="Patient age in years")
+    age: float = Field(..., ge=18, le=100, description="Patient age in years")
     bmi: float = Field(..., ge=10, le=70, description="Body Mass Index")
-    hba1c: float = Field(..., ge=3.0, le=20.0, description="HbA1c level (%)")
+    hba1c: float = Field(..., ge=3.0, lt=20.0, description="HbA1c level (%)")
     blood_pressure_systolic: float = Field(..., ge=60, le=250, description="Systolic BP (mmHg)")
     blood_pressure_diastolic: float = Field(..., ge=30, le=150, description="Diastolic BP (mmHg)")
     cholesterol_total: float = Field(..., ge=50, le=500, description="Total cholesterol (mg/dL)")
@@ -103,4 +103,3 @@ class BatchPredictionResponse(BaseModel):
     low_risk_count: int
     avg_risk_score: float
     results: List[BatchItemResult]
-
