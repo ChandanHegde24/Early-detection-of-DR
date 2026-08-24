@@ -594,7 +594,13 @@ async def predict_image(file: UploadFile = File(...)):
     if _models["cnn"] is None:
         raise HTTPException(status_code=503, detail="CNN model not loaded.")
 
+    if file is None or file.filename is None:
+        raise HTTPException(status_code=400, detail="File is required and must have a filename.")
+    
     contents = await file.read()
+    if not contents:
+        raise HTTPException(status_code=400, detail="File is empty.")
+    
     img_resized = _preprocess_image_for_inference(contents)
 
     pred = _models["cnn"].predict(np.expand_dims(img_resized, axis=0), verbose=0)[0]
