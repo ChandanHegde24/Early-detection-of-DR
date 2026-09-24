@@ -1,0 +1,21 @@
+{
+  "features": [
+    "age",
+    "bmi",
+    "hba1c",
+    "blood_pressure_systolic",
+    "blood_pressure_diastolic",
+    "cholesterol_total",
+    "cholesterol_hdl",
+    "cholesterol_ldl",
+    "triglycerides",
+    "diabetes_duration_years",
+    "smoking_status",
+    "family_history_dr",
+    "hba1c_duration",
+    "bp_pulse",
+    "chol_ratio",
+    "high_risk_combo",
+    "metabolic_score"
+  ]
+}
