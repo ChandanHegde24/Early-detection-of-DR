@@ -31,8 +31,11 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.config import load_settings
-from src.models.biomarker_rf import load_biomarker_model, predict_biomarker_proba
-from src.models.retinal_cnn import load_cnn_model
+from src.models.biomarker_runtime import (
+    load_biomarker_model,
+    predict_biomarker_proba,
+)
+from src.models.retinal_cnn_tf import load_cnn_model, predict_fundus
 from src.models.late_fusion import unified_prediction
 from src.explainability.grad_cam import explain_prediction
 from src.data_prep.image_loader import apply_clahe, crop_to_circle
@@ -404,43 +407,185 @@ async def health_check():
 
 @app.post("/predict/biomarker", response_model=PredictionResponse)
 async def predict_biomarker(request: PredictionRequest):
-    """Predict DR from clinical biomarkers only."""
+    """Predict DR risk from clinical biomarkers only.
+
+    The saved biomarker model is a binary classifier:
+        0 = No DR
+        1 = Has DR
+
+    This endpoint intentionally does not convert the biomarker
+    prediction into the CNN's 5-class DR severity grades.
+    """
     _ensure_models_loaded()
+
     if _models["biomarker"] is None:
-        raise HTTPException(status_code=503, detail="Biomarker model not loaded.")
+        raise HTTPException(
+            status_code=503,
+            detail="Biomarker model not loaded."
+        )
 
     import pandas as pd
+
     b = request.biomarkers
+
+    # ------------------------------------------------------------
+    # Build the same 17-feature vector used by the saved model
+    # ------------------------------------------------------------
     df = pd.DataFrame([b.model_dump()])
-    df["hba1c_duration"]  = df["hba1c"] * df["diabetes_duration_years"]
-    df["bp_pulse"]        = df["blood_pressure_systolic"] - df["blood_pressure_diastolic"]
-    df["chol_ratio"]      = df["cholesterol_total"] / (df["cholesterol_hdl"] + 0.001)
-    df["high_risk_combo"] = ((df["hba1c"] > 8.0) & (df["diabetes_duration_years"] > 10)).astype(int)
-    df["metabolic_score"] = df["bmi"] * 0.3 + df["triglycerides"] * 0.01 + df["hba1c"] * 0.5
-    FEATURE_COLS = ["age","bmi","hba1c","blood_pressure_systolic","blood_pressure_diastolic",
-                    "cholesterol_total","cholesterol_hdl","cholesterol_ldl","triglycerides",
-                    "diabetes_duration_years","smoking_status","family_history_dr",
-                    "hba1c_duration","bp_pulse","chol_ratio","high_risk_combo","metabolic_score"]
+
+    df["hba1c_duration"] = (
+        df["hba1c"] *
+        df["diabetes_duration_years"]
+    )
+
+    df["bp_pulse"] = (
+        df["blood_pressure_systolic"] -
+        df["blood_pressure_diastolic"]
+    )
+
+    df["chol_ratio"] = (
+        df["cholesterol_total"] /
+        (df["cholesterol_hdl"] + 0.001)
+    )
+
+    df["high_risk_combo"] = (
+        (df["hba1c"] > 8.0) &
+        (df["diabetes_duration_years"] > 10)
+    ).astype(int)
+
+    df["metabolic_score"] = (
+        df["bmi"] * 0.3 +
+        df["triglycerides"] * 0.01 +
+        df["hba1c"] * 0.5
+    )
+
+    FEATURE_COLS = [
+        "age",
+        "bmi",
+        "hba1c",
+        "blood_pressure_systolic",
+        "blood_pressure_diastolic",
+        "cholesterol_total",
+        "cholesterol_hdl",
+        "cholesterol_ldl",
+        "triglycerides",
+        "diabetes_duration_years",
+        "smoking_status",
+        "family_history_dr",
+        "hba1c_duration",
+        "bp_pulse",
+        "chol_ratio",
+        "high_risk_combo",
+        "metabolic_score",
+    ]
+
     X = df[FEATURE_COLS].values
+
+    # ------------------------------------------------------------
+    # Apply saved scaler
+    # ------------------------------------------------------------
     if _models["scaler"] is not None:
         X = _models["scaler"].transform(X)
 
-    proba = predict_biomarker_proba(_models["biomarker"], X)[0]
-    grade = int(np.argmax(proba))
-    severity_weights = np.array([0.0, 0.25, 0.5, 0.75, 1.0])
-    risk_score = float(proba @ severity_weights)
-    baseline_score, factors = compute_clinical_rule_score(request.biomarkers)
-    baseline_recommendation = clinical_recommendation_from_score(baseline_score)
+    # ------------------------------------------------------------
+    # Binary biomarker prediction
+    # ------------------------------------------------------------
+    proba = predict_biomarker_proba(
+        _models["biomarker"],
+        X
+    )[0]
 
-    return _build_response(
-        grade,
+    proba = np.asarray(proba, dtype=float)
+
+    if proba.shape[0] != 2:
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Biomarker model must return exactly 2 probabilities "
+                f"(No DR, Has DR), but returned shape {proba.shape}."
+            ),
+        )
+
+    # Probability of the positive class: Has DR
+    no_dr_probability = float(proba[0])
+    has_dr_probability = float(proba[1])
+
+    # Normalize defensively
+    probability_sum = no_dr_probability + has_dr_probability
+
+    if probability_sum <= 0:
+        raise HTTPException(
+            status_code=500,
+            detail="Invalid biomarker probability output."
+        )
+
+    no_dr_probability /= probability_sum
+    has_dr_probability /= probability_sum
+
+    predicted_class = int(
+        1 if has_dr_probability >= no_dr_probability else 0
+    )
+
+    predicted_label = (
+        "Has DR"
+        if predicted_class == 1
+        else "No DR"
+    )
+
+    # For the biomarker-only model, risk_score represents
+    # probability of the positive DR class.
+    risk_score = has_dr_probability
+
+    # ------------------------------------------------------------
+    # Existing rule-based Stage-1 clinical score
+    # ------------------------------------------------------------
+    baseline_score, factors = compute_clinical_rule_score(
+        request.biomarkers
+    )
+
+    baseline_recommendation = clinical_recommendation_from_score(
+        baseline_score
+    )
+
+    # ------------------------------------------------------------
+    # IMPORTANT:
+    # _build_response expects a 5-class vector.
+    # For biomarker-only mode we therefore do NOT pretend that
+    # the binary model predicts DR severity grades.
+    #
+    # We construct a display-only vector where:
+    #   Grade 0 receives P(No DR)
+    #   Grade 1 receives P(Has DR)
+    #   Grades 2-4 remain zero
+    #
+    # This is only for backward compatibility with the current
+    # PredictionResponse schema. The frontend should display
+    # the binary biomarker result as No DR / Has DR.
+    # ------------------------------------------------------------
+    display_proba = np.array(
+        [
+            no_dr_probability,
+            has_dr_probability,
+            0.0,
+            0.0,
+            0.0,
+        ],
+        dtype=float,
+    )
+
+    display_grade = predicted_class
+
+    response = _build_response(
+        display_grade,
         risk_score,
-        proba,
-        model_used="biomarker + rule-based stage-1",
+        display_proba,
+        model_used="biomarker-only (binary clinical risk model)",
         baseline_clinical_score=baseline_score,
         baseline_recommendation=baseline_recommendation,
         baseline_factor_breakdown=factors,
     )
+
+    return response
 
 
 @app.post("/predict/batch", response_model=BatchPredictionResponse)

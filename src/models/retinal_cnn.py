@@ -9,7 +9,7 @@ import os
 from typing import Optional, Tuple
 
 import tensorflow as tf
-from tensorflow import keras
+import keras
 from tensorflow.keras import layers, Model
 from tensorflow.keras.applications import (
     ResNet50,
