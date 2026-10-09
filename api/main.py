@@ -311,6 +311,7 @@ def _build_clinical_report_pdf(response: PredictionResponse, biomarkers: Biomark
         pagesizes_module = importlib.import_module("reportlab.lib.pagesizes")
         pdfgen_canvas_module = importlib.import_module("reportlab.pdfgen.canvas")
         utils_module = importlib.import_module("reportlab.lib.utils")
+        colors_module = importlib.import_module("reportlab.lib.colors")
     except ModuleNotFoundError as exc:
         raise HTTPException(
             status_code=500,
@@ -325,62 +326,191 @@ def _build_clinical_report_pdf(response: PredictionResponse, biomarkers: Biomark
     pdf = canvas.Canvas(buffer, pagesize=A4)
     width, height = A4
 
-    y = height - 40
+    # A calm, high contrast clinical palette with consistent card alignment.
+    colors = colors_module
+    navy = colors.HexColor("#123047")
+    teal = colors.HexColor("#087E8B")
+    ink = colors.HexColor("#243746")
+    muted = colors.HexColor("#667987")
+    pale = colors.HexColor("#F2F7F8")
+    line = colors.HexColor("#DCE7EA")
+    margin = 42
+    content_w = width - 2 * margin
     pdf.setTitle("DR Clinical Screening Report")
-    pdf.setFont("Helvetica-Bold", 16)
-    pdf.drawString(40, y, "Diabetic Retinopathy Clinical Screening Report")
 
-    y -= 24
-    pdf.setFont("Helvetica", 10)
-    pdf.drawString(40, y, "Stage 1: Rule-Based Baseline Clinical Risk")
-    y -= 16
+    def section_title(label, top):
+        pdf.setFillColor(teal)
+        pdf.roundRect(margin, top - 2, 4, 15, 2, fill=1, stroke=0)
+        pdf.setFillColor(navy)
+        pdf.setFont("Helvetica-Bold", 11)
+        pdf.drawString(margin + 12, top, label.upper())
+
+    # Header band and concise report identity.
+    pdf.setFillColor(navy)
+    pdf.rect(0, height - 124, width, 124, fill=1, stroke=0)
+    pdf.setFillColor(colors.HexColor("#8FE0D2"))
+    pdf.setFont("Helvetica-Bold", 9)
+    pdf.drawString(margin, height - 40, "RETINAL HEALTH  /  SCREENING SUMMARY")
+    pdf.setFillColor(colors.white)
+    pdf.setFont("Helvetica-Bold", 21)
+    pdf.drawString(margin, height - 70, "Clinical Screening Report")
+    pdf.setFillColor(colors.HexColor("#D5E5EA"))
+    pdf.setFont("Helvetica", 9)
+    pdf.drawString(margin, height - 91, "Diabetic retinopathy risk assessment")
+
+    y = height - 151
+    # Primary result card: risk and model finding are easy to scan.
+    card_h = 91
+    pdf.setFillColor(pale)
+    pdf.roundRect(margin, y - card_h, content_w, card_h, 10, fill=1, stroke=0)
+    pdf.setFillColor(muted)
+    pdf.setFont("Helvetica-Bold", 8)
+    pdf.drawString(margin + 17, y - 21, "PREDICTED GRADE")
+    pdf.setFillColor(navy)
+    pdf.setFont("Helvetica-Bold", 15)
+    pdf.drawString(margin + 17, y - 44, f"Grade {response.predicted_grade}  ·  {response.predicted_label}")
+    pdf.setFillColor(muted)
+    pdf.setFont("Helvetica", 9)
+    pdf.drawString(margin + 17, y - 65, f"Screening tier: {response.screening_tier}")
+    split_x = width - margin - 123
+    pdf.setStrokeColor(line)
+    pdf.line(split_x, y - 15, split_x, y - card_h + 15)
+    pdf.setFillColor(teal)
+    pdf.setFont("Helvetica-Bold", 8)
+    pdf.drawString(split_x + 18, y - 22, "UNIFIED RISK")
+    pdf.setFillColor(navy)
+    pdf.setFont("Helvetica-Bold", 24)
+    pdf.drawString(split_x + 18, y - 53, f"{response.risk_score:.3f}")
+    y -= card_h + 25
+
+    # Baseline assessment and biomarker snapshot in aligned columns.
+    section_title("Clinical baseline", y)
+    y -= 17
     baseline_score = response.baseline_clinical_score if response.baseline_clinical_score is not None else 0.0
-    pdf.drawString(50, y, f"Baseline clinical score: {baseline_score:.3f}")
-    y -= 14
-    recommendation = response.baseline_recommendation or "Not available"
-    pdf.drawString(50, y, f"Recommendation: {recommendation}")
+    card_y = y - 67
+    half_w = (content_w - 12) / 2
+    pdf.setFillColor(colors.white)
+    pdf.setStrokeColor(line)
+    pdf.roundRect(margin, card_y, half_w, 67, 8, fill=1, stroke=1)
+    pdf.roundRect(margin + half_w + 12, card_y, half_w, 67, 8, fill=1, stroke=1)
+    pdf.setFillColor(muted)
+    pdf.setFont("Helvetica", 8)
+    pdf.drawString(margin + 13, y - 18, "RULE BASED SCORE")
+    pdf.setFillColor(navy)
+    pdf.setFont("Helvetica-Bold", 17)
+    pdf.drawString(margin + 13, y - 42, f"{baseline_score:.3f}")
+    pdf.setFillColor(muted)
+    pdf.setFont("Helvetica", 8)
+    pdf.drawString(margin + half_w + 25, y - 18, "RECOMMENDATION")
+    pdf.setFillColor(ink)
+    pdf.setFont("Helvetica-Bold", 9)
+    rec = response.baseline_recommendation or "Not available"
+    pdf.drawString(margin + half_w + 25, y - 39, rec[:48])
+    y = card_y - 22
 
-    y -= 22
-    pdf.drawString(40, y, "Stage 2: AI DR Grading")
-    y -= 16
-    pdf.drawString(50, y, f"Predicted grade: {response.predicted_grade} ({response.predicted_label})")
-    y -= 14
-    pdf.drawString(50, y, f"Unified risk score: {response.risk_score:.3f}")
-    y -= 14
-    pdf.drawString(50, y, f"Screening tier: {response.screening_tier}")
+    section_title("Biomarker snapshot", y)
+    y -= 17
+    stats = [
+        ("HbA1c", f"{biomarkers.hba1c:.2f}%"),
+        ("Systolic BP", f"{biomarkers.blood_pressure_systolic:.0f} mmHg"),
+        ("BMI", f"{biomarkers.bmi:.1f}"),
+        ("LDL", f"{biomarkers.cholesterol_ldl:.0f} mg/dL"),
+        ("Triglycerides", f"{biomarkers.triglycerides:.0f} mg/dL"),
+    ]
+    gap = 7
+    box_w = (content_w - gap * (len(stats) - 1)) / len(stats)
+    for idx, (label, value) in enumerate(stats):
+        x = margin + idx * (box_w + gap)
+        pdf.setFillColor(pale)
+        pdf.roundRect(x, y - 43, box_w, 43, 6, fill=1, stroke=0)
+        pdf.setFillColor(muted)
+        pdf.setFont("Helvetica", 7)
+        pdf.drawString(x + 8, y - 14, label.upper())
+        pdf.setFillColor(ink)
+        pdf.setFont("Helvetica-Bold", 9)
+        pdf.drawString(x + 8, y - 31, value)
+    y -= 65
 
-    y -= 22
-    pdf.drawString(40, y, "Biomarker Snapshot")
-    y -= 16
-    pdf.drawString(50, y, f"HbA1c: {biomarkers.hba1c:.2f}%, SBP: {biomarkers.blood_pressure_systolic:.0f} mmHg, BMI: {biomarkers.bmi:.1f}")
-    y -= 14
-    pdf.drawString(50, y, f"LDL: {biomarkers.cholesterol_ldl:.0f} mg/dL, Triglycerides: {biomarkers.triglycerides:.0f} mg/dL")
-
-    y -= 22
-    pdf.drawString(40, y, "Grade Probabilities")
-    y -= 16
+    section_title("Model confidence by grade", y)
+    y -= 18
+    bar_x = margin + 160
+    bar_w = content_w - 220
     for prob in response.grade_probabilities:
-        pdf.drawString(50, y, f"Grade {prob.grade} ({prob.label}): {prob.probability:.3f}")
-        y -= 13
-        if y < 120:
+        if y < 100:
             pdf.showPage()
-            y = height - 40
-            pdf.setFont("Helvetica", 10)
+            y = height - 55
+        pdf.setFillColor(ink)
+        pdf.setFont("Helvetica", 8)
+        pdf.drawString(margin, y, f"{prob.grade}  {prob.label}")
+        pdf.setFillColor(line)
+        pdf.roundRect(bar_x, y - 3, bar_w, 8, 4, fill=1, stroke=0)
+        pdf.setFillColor(teal)
+        pdf.roundRect(bar_x, y - 3, bar_w * max(0.0, min(1.0, prob.probability)), 8, 4, fill=1, stroke=0)
+        pdf.setFillColor(muted)
+        pdf.setFont("Helvetica-Bold", 8)
+        pdf.drawRightString(width - margin, y, f"{prob.probability:.1%}")
+        y -= 18
 
-    if response.grad_cam_overlay:
+    gradcam_images = [
+        ("Grad-CAM overlay", response.grad_cam_overlay),
+        ("Grad-CAM heatmap", response.grad_cam_heatmap),
+    ]
+    available_images = []
+    for label, data_url in gradcam_images:
+        if not data_url:
+            continue
         try:
-            overlay_bytes = _decode_data_url_to_bytes(response.grad_cam_overlay)
-            image_reader = ImageReader(io.BytesIO(overlay_bytes))
-            img_w = width - 120
-            img_h = 220
-            if y < img_h + 80:
-                pdf.showPage()
-                y = height - 40
-            pdf.drawString(40, y - 6, "Stage 3: Grad-CAM Overlay")
-            y -= img_h + 16
-            pdf.drawImage(image_reader, 60, y, width=img_w, height=img_h, preserveAspectRatio=True, mask="auto")
+            image_bytes = _decode_data_url_to_bytes(data_url)
+            available_images.append((label, ImageReader(io.BytesIO(image_bytes))))
         except Exception:
-            pass
+            logger.warning("Could not decode %s for clinical report.", label)
+
+    if available_images:
+        img_h = 155
+        title_gap = 20
+        card_h = img_h + 35
+        if y < card_h + title_gap + 50:
+            pdf.showPage()
+            y = height - 55
+        y -= 10
+        section_title("AI image explanation", y)
+        y -= title_gap
+
+        gap = 12
+        card_w = (content_w - gap) / 2 if len(available_images) == 2 else content_w
+        for idx, (label, image_reader) in enumerate(available_images):
+            x = margin + idx * (card_w + gap)
+            card_bottom = y - card_h
+            pdf.setFillColor(colors.white)
+            pdf.setStrokeColor(line)
+            pdf.roundRect(x, card_bottom, card_w, card_h, 8, fill=1, stroke=1)
+            pdf.setFillColor(navy)
+            pdf.setFont("Helvetica-Bold", 8)
+            pdf.drawString(x + 10, y - 16, label.upper())
+            image_x = x + 9
+            image_y = card_bottom + 9
+            image_w = card_w - 18
+            image_h = img_h
+            pdf.setFillColor(pale)
+            pdf.roundRect(image_x, image_y, image_w, image_h, 5, fill=1, stroke=0)
+            pdf.drawImage(
+                image_reader,
+                image_x + 3,
+                image_y + 3,
+                width=image_w - 6,
+                height=image_h - 6,
+                preserveAspectRatio=True,
+                anchor="c",
+                mask="auto",
+            )
+
+    # Quiet footer anchors the document without competing with results.
+    pdf.setStrokeColor(line)
+    pdf.line(margin, 34, width - margin, 34)
+    pdf.setFillColor(muted)
+    pdf.setFont("Helvetica", 7)
+    pdf.drawString(margin, 22, "AI assisted screening summary  ·  For clinical review")
+    pdf.drawRightString(width - margin, 22, "DR EARLY DETECTION")
 
     pdf.save()
     buffer.seek(0)
