@@ -1,234 +1,233 @@
-# Diabetic Retinopathy Early Detection — Unified AI System
+# Diabetic Retinopathy Early Detection
 
-An AI-powered system for the early detection and severity grading of **Diabetic Retinopathy (DR)** by combining clinical biomarker analysis with deep learning–based retinal image classification.
+A research prototype for early diabetic retinopathy (DR) screening. It explores how retinal fundus images and patient clinical measurements can be used together to estimate DR severity and help prioritize cases for review. The repository contains model training code, a FastAPI inference service, and a Next.js screening interface.
 
----
+> **Research use only.** This software is not a medical device and is not intended to diagnose disease or guide treatment. Predictions must be reviewed by a qualified clinician and must not replace a comprehensive eye examination.
 
-## Objectives
+## Problem this project addresses
 
-1. **Rule-based Stage-1 clinical gatekeeper** — expert-threshold baseline risk scoring (SBP, HbA1c, BMI, lipids, duration, etc.) with recommendation to proceed to fundus scan
-2. **Biomarker-based risk prediction** — XGBoost/Random Forest model on clinical data (HbA1c, blood pressure, cholesterol, etc.)
-3. **CNN-based retinal image classification** — Transfer learning (EfficientNet/ResNet) on fundus photographs
-4. **Improved early detection** — Late fusion of both models into a unified risk score
-5. **Interpretability** — Grad-CAM heatmaps highlighting diagnostically relevant retinal regions
-6. **Clinical reporting** — one-click downloadable PDF report combining Stage-1 baseline score, DR grade, and Grad-CAM visualization
+DR severity is assessed from retinal findings, while patient measurements can provide additional context for screening. This project investigates a software workflow that accepts a retinal fundus image and clinical measurements, estimates one of five DR grades, and presents a risk-based screening priority. It is intended as a research and engineering project; this repository does not establish clinical performance or validate that the workflow improves patient outcomes.
+
+## Proposed workflow
+
+The combined prediction workflow brings together three kinds of output:
+
+1. **Clinical baseline:** a transparent, rule-based score from selected measurements. It produces a recommendation to proceed to fundus imaging or continue routine monitoring.
+2. **DR grade estimate:** a five-class image model, a clinical biomarker classifier, or a weighted combination of both model probability outputs.
+3. **Review aids:** class probabilities, a severity-weighted risk score, a screening priority, and Grad-CAM visualization for image-based predictions.
+
+For combined screening, the image and biomarker probabilities are combined using weights from `src/config/settings.yaml` (currently 0.6 and 0.4). Severe or proliferative outputs from either model can trigger an urgent priority in the fusion logic. The clinical baseline score is reported separately; it is not part of the probability fusion. The screening interface is at `/screening` and can display results and request a PDF report. `/history` is currently a placeholder page; it does not store or display screening records.
+
+This repository includes labeled fundus images under `raw_combined/`, but does not include a patient-level clinical biomarker dataset or tracked trained model weights. Local files under `saved_models/` may be present in a developer's checkout, but they are not a dependable part of a fresh clone. The project has no documented clinical validation. Predictions depend on the provenance and quality of data used to train the local models; demo or synthetic-data results are not evidence of diagnostic accuracy.
+
+### DR grades
+
+| Grade | Classification | Summary |
+| --- | --- | --- |
+| 0 | No DR | No visible diabetic retinopathy |
+| 1 | Mild NPDR | Microaneurysms only |
+| 2 | Moderate NPDR | More than microaneurysms, below severe criteria |
+| 3 | Severe NPDR | Severe non-proliferative retinopathy |
+| 4 | Proliferative DR | Proliferative retinopathy |
 
 ## Architecture
 
 ```mermaid
-flowchart TB
-    subgraph INPUT ["🔬 INPUT DATA"]
-        direction LR
-        BIO["🩺 Clinical Biomarkers\n─────────────────\nAge · BMI · HbA1c\nBlood Pressure\nCholesterol · Triglycerides\nDiabetes Duration"]
-        IMG["👁️ Retinal Fundus Image\n─────────────────\n224 × 224 RGB\nCLAHE Enhanced\nAugmented"]
-    end
-
-    subgraph PREPROCESS ["⚙️ PREPROCESSING"]
-        direction LR
-        TAB_PREP["📊 Tabular Pipeline\n─────────────────\nImputation · Scaling\nEncoding"]
-      IMG_PREP["🖼️ Image Pipeline\n─────────────────\nCrop · CLAHE\nResize · Normalize"]
-    end
-
-    subgraph STAGE1 ["🩺 STAGE 1 CLINICAL GATEKEEPER"]
-      RULES["📐 Rule-Based Expert Scoring\n─────────────────\nThreshold Rules\nWeighted Baseline Score\nScan Recommendation"]
-    end
-
-    subgraph MODELS ["🧠 AI MODELS"]
-        direction LR
-        XGB["🌳 XGBoost / Random Forest\n─────────────────\nBiomarker Risk Model\nn_estimators: 200\nmax_depth: 6"]
-        CNN["🔮 EfficientNetB0\n─────────────────\nTransfer Learning CNN\nImageNet Pretrained\nFine-Tuned"]
-    end
-
-    subgraph FUSION ["⚡ LATE FUSION"]
-        FUSE["🔗 Weighted Average\n─────────────────\nCNN: 60% · Biomarker: 40%\nUnified Probability Vector"]
-    end
-
-    subgraph OUTPUT ["📋 OUTPUT"]
-        direction LR
-        GRADE["🎯 DR Grade\n─────────────\n0 — No DR\n1 — Mild\n2 — Moderate\n3 — Severe\n4 — Proliferative"]
-        SCORE["📈 Risk Score\n─────────────\nContinuous 0–1\nSeverity-Weighted"]
-      BASELINE["🩺 Baseline Clinical Score\n─────────────\nRule-Based 0–1\nProceed/Monitor Recommendation"]
-        TIER["🚦 Screening Tier\n─────────────\n🔴 Urgent ≥ 0.75\n🟡 Moderate ≥ 0.45\n🟢 Low Risk < 0.45"]
-        EXPLAIN["🔍 Grad-CAM\n─────────────\nHeatmap Overlay\nRegion Highlighting\nClinical Trust"]
-      PDF["🧾 Clinical PDF Report\n─────────────\nBaseline + Grade + Risk\nGrad-CAM Overlay\nDownloadable"]
-    end
-
-    BIO --> RULES
-    BIO --> TAB_PREP --> XGB
-    IMG --> IMG_PREP --> CNN
-    XGB -->|"probabilities"| FUSE
-    CNN -->|"probabilities"| FUSE
-    FUSE --> GRADE
-    FUSE --> SCORE
-    RULES --> BASELINE
-    FUSE --> TIER
-    CNN -.->|"explainability"| EXPLAIN
-    BASELINE --> PDF
-    GRADE --> PDF
-    SCORE --> PDF
-    EXPLAIN --> PDF
-
-    style INPUT fill:#e8f4f8,stroke:#2196F3,stroke-width:2px
-    style PREPROCESS fill:#fff3e0,stroke:#FF9800,stroke-width:2px
-    style MODELS fill:#f3e5f5,stroke:#9C27B0,stroke-width:2px
-    style FUSION fill:#fce4ec,stroke:#E91E63,stroke-width:2px
-    style OUTPUT fill:#e8f5e9,stroke:#4CAF50,stroke-width:2px
+flowchart LR
+    UI[Next.js screening interface] --> API[FastAPI]
+    API --> RULES[Clinical baseline rules]
+    API --> BIO[Biomarker classifier]
+    API --> IMG[Fundus image CNN]
+    BIO --> FUSE[Probability fusion]
+    IMG --> FUSE
+    IMG --> CAM[Grad-CAM visualization]
+    RULES --> RESULT[Screening result and PDF report]
+    FUSE --> RESULT
+    CAM --> RESULT
 ```
 
-## DR Severity Grades
-
-| Grade | Label | Description |
-| ----- | ----- | ----------- |
-| 0 | No DR | No visible signs of retinopathy |
-| 1 | Mild NPDR | Microaneurysms only |
-| 2 | Moderate NPDR | More than just microaneurysms |
-| 3 | Severe NPDR | Extensive intraretinal abnormalities |
-| 4 | Proliferative DR | Neovascularization / vitreous hemorrhage |
-
-## Project Structure
+## Repository layout
 
 ```text
-├── data/                       # Local data (not committed)
-│   ├── raw/                    # Original images & clinical CSVs
-│   ├── processed/              # Cleaned data & augmented images
-│   └── sample_inputs/          # Quick-test samples
-├── notebooks/                  # Jupyter notebooks
-│   ├── 01_eda_biomarkers.ipynb
-│   ├── 02_eda_images.ipynb
-│   ├── 03_cnn_prototyping.ipynb
-│   └── 04_gradcam_tests.ipynb
-├── src/                        # Source code
-│   ├── config/settings.yaml    # Hyperparameters & paths
-│   ├── data_prep/              # Image & tabular preprocessing
-│   ├── models/                 # Biomarker RF, CNN, Late Fusion
-│   ├── explainability/         # Grad-CAM
-│   └── pipeline/               # train.py, evaluate.py
-├── saved_models/               # Trained model weights
-├── api/                        # FastAPI backend
-│   ├── main.py                 # API endpoints
-│   ├── schemas.py              # Pydantic request/response models
-│   └── prioritization.py       # Risk → screening tier mapping
-├── requirements.txt
-└── README.md
+api/                  FastAPI routes, request schemas, screening prioritization
+frontend/             Next.js and TypeScript web application
+src/config/           Model, preprocessing, and screening configuration
+src/data_prep/        Image and tabular data preparation
+src/models/           Biomarker model, retinal CNN, and probability fusion
+src/pipeline/         Training and evaluation workflows
+src/explainability/   Grad-CAM implementation
+notebooks/            Exploratory analysis and model prototyping
+tests/                API and model tests
+raw_combined/         Labeled retinal fundus images, arranged by grade (0-4)
+data/                 Local clinical data and generated artifacts (not included)
+saved_models/         Local model artifacts (created during training; not tracked)
 ```
 
-## Setup
+## Requirements
+
+- Python 3.11 (used by the API Docker image)
+- Node.js 22 and npm (for the frontend)
+- Retinal image and clinical datasets for training
+- Trained model artifacts in `saved_models/` for prediction
+
+Install Python dependencies from the repository root:
 
 ```bash
-# 1. Clone the repository
-git clone https://github.com/ChandanHegde24/Early-detection-of-DR.git
-cd Early-detection-of-DR
+python -m venv .venv
+```
 
-# 2. Create a virtual environment
-python -m venv venv
-venv\Scripts\activate          # Windows
-# source venv/bin/activate     # Linux/Mac
+Activate the environment, then install the pinned packages:
 
-# 3. Install dependencies
+```powershell
+# Windows PowerShell
+.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
-
-# 4. Place your data
-#    - Clinical CSV → data/raw/clinical_data.csv
-#    - Fundus images → data/raw/images/
-#    - Image labels  → data/raw/image_labels.csv (columns: filename, label)
 ```
 
-## Usage
-
-### Training
-
 ```bash
-# Train both models (biomarker + CNN)
-python -m src.pipeline.train
-
-# Or train individually
-python -c "from src.pipeline.train import train_biomarker_pipeline; train_biomarker_pipeline()"
-python -c "from src.pipeline.train import train_cnn_pipeline; train_cnn_pipeline()"
+# macOS / Linux
+source .venv/bin/activate
+pip install -r requirements.txt
 ```
 
-### Evaluation
+Install and start the frontend in a separate terminal:
 
 ```bash
-# Run full evaluation (accuracy, F1, ROC-AUC, confusion matrices)
+cd frontend
+npm ci
+```
+
+Create `frontend/.env.local` with the API URL:
+
+```dotenv
+NEXT_PUBLIC_API_BASE_URL=http://localhost:8000
+```
+
+Then run the development server:
+
+```bash
+npm run dev
+```
+
+Open `http://localhost:3000/screening` to use the screening form.
+
+## Data and model setup
+
+The repository contains labeled fundus images under `raw_combined/raw_combined/`, grouped into grade folders (`0` through `4`). The CNN loader defaults to `raw_combined/` and scans for those class folders. Verify the image labels, dataset provenance, and any applicable usage terms before training. Keep patient-identifiable clinical data local and do not commit it.
+
+Clinical training data is read from `data/raw/clinical_data.csv` by default. It should include the configured clinical features and a `dr_grade` target (integer grades 0-4). **Important:** if the file is missing or does not meet the loader's class-count requirements, the current preprocessing code generates synthetic clinical data. Check the training output and `src/data_prep/tabular_prep.py` before training; a model trained on generated data is for pipeline development only and is not clinically meaningful. Model artifacts are written to `saved_models/` and are not tracked by Git. Image inference requires CNN weights; biomarker inference requires a classifier and scaler. Train the required models in your checkout before using these prediction routes.
+
+The repository also includes a random-data generator:
+
+```bash
+python create_dummy_data.py
+```
+
+This creates random sample data for development only. It is not a correctly labeled clinical dataset and must not be used to claim model performance or make screening decisions.
+
+## Train and evaluate
+
+Train both model pipelines using their defaults:
+
+```bash
+python -m src.pipeline.train --model all
+```
+
+Train one model at a time:
+
+```bash
+python -m src.pipeline.train --model biomarker
+python -m src.pipeline.train --model cnn --data_dir raw_combined
+```
+
+For a quicker CNN development run, limit the number of images used per grade:
+
+```bash
+python -m src.pipeline.train --model cnn --subset 200 --epochs 2 --fine_tune_epochs 0
+```
+
+The training CLI also supports `--backbone`, `--batch_size`, and `--force` (for biomarker retraining). Review `TRAINING_GUIDE.md` and the pipeline options before starting a full training run.
+
+Evaluate the configured biomarker and image datasets:
+
+```bash
 python -m src.pipeline.evaluate
 ```
 
-### API Server
+Evaluation requires the relevant datasets and trained model artifacts. Results and model output paths are controlled by the pipeline and configuration files.
+
+## Run the API
+
+From the repository root, start FastAPI:
 
 ```bash
-# Start the FastAPI server
-uvicorn api.main:app --reload --port 8000
-
-# Endpoints:
-#   GET  /health              — Health check
-#   POST /predict/biomarker   — Predict from clinical data only
-#   POST /predict/image       — Predict from retinal image only
-#   POST /predict/unified     — Predict from both (late fusion)
-#   POST /predict/unified/report — Predict + return downloadable clinical PDF report
+uvicorn api.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
-### Download Clinical PDF Report
+Interactive API documentation is available at `http://localhost:8000/docs`. Check service and model loading with:
 
 ```bash
-curl -X POST http://localhost:8000/predict/unified/report \
-  -F "file=@data/sample_inputs/sample_fundus.jpg" \
-  -F "age=58" \
-  -F "bmi=28.5" \
-  -F "hba1c=8.2" \
-  -F "blood_pressure_systolic=145" \
-  -F "blood_pressure_diastolic=92" \
-  -F "cholesterol_total=240" \
-  -F "cholesterol_hdl=42" \
-  -F "cholesterol_ldl=160" \
-  -F "triglycerides=200" \
-  -F "diabetes_duration_years=12" \
-  -F "smoking_status=1" \
-  -F "family_history_dr=1" \
-  --output dr_clinical_report.pdf
+curl http://localhost:8000/health
 ```
 
-### API Example
+### Endpoints
+
+| Method | Endpoint | Input |
+| --- | --- | --- |
+| `GET` | `/health` | None; reports service status and loaded models |
+| `POST` | `/predict/biomarker` | JSON object containing a `biomarkers` object |
+| `POST` | `/predict/image` | Multipart form field `file` with a fundus image |
+| `POST` | `/predict/unified` | Multipart `file` and the required clinical form fields |
+| `POST` | `/predict/unified/report` | Same as unified prediction; returns a PDF download |
+| `POST` | `/predict/batch` | Multipart CSV file of patient rows |
+
+Example biomarker request:
 
 ```bash
-# Biomarker-only prediction
 curl -X POST http://localhost:8000/predict/biomarker \
   -H "Content-Type: application/json" \
   -d '{
     "biomarkers": {
-      "age": 58, "bmi": 28.5, "hba1c": 8.2,
-      "blood_pressure_systolic": 145, "blood_pressure_diastolic": 92,
-      "cholesterol_total": 240, "cholesterol_hdl": 42,
-      "cholesterol_ldl": 160, "triglycerides": 200,
+      "age": 58,
+      "bmi": 28.5,
+      "hba1c": 8.2,
+      "blood_pressure_systolic": 145,
+      "blood_pressure_diastolic": 92,
+      "cholesterol_total": 240,
+      "cholesterol_hdl": 42,
+      "cholesterol_ldl": 160,
+      "triglycerides": 200,
       "diabetes_duration_years": 12,
-      "smoking_status": 1, "family_history_dr": 1
+      "smoking_status": 1,
+      "family_history_dr": 1
     }
   }'
 ```
 
+The response includes a predicted grade and label, per-grade probabilities, a risk score, a screening tier, and the model used. Image and unified predictions can include Grad-CAM heatmap and overlay data URLs. The batch endpoint accepts CSV input; see `api/main.py` for supported column aliases and defaults.
+
+## Docker Compose
+
+The repository includes a Compose configuration for the API and frontend:
+
+```bash
+docker compose up --build
+```
+
+The frontend is served on port `3000` and the API on port `8000`. The API container mounts `saved_models/` read-only, so add the required trained artifacts locally before expecting predictions to succeed. The frontend API URL is set at image build time with `NEXT_PUBLIC_API_BASE_URL`. Compose also accepts `CORS_ORIGINS`, `MAX_FILE_SIZE_MB`, `TIER_URGENT_THRESHOLD`, and `TIER_MODERATE_THRESHOLD` environment variables.
+
 ## Configuration
 
-All hyperparameters are in `src/config/settings.yaml`:
+`src/config/settings.yaml` contains the default image dimensions and preprocessing settings, clinical feature names, CNN backbone and training values, biomarker model parameters, fusion weights, screening tier thresholds, and baseline recommendation threshold. The API and training pipelines read from this configuration.
 
-| Parameter | Default | Description |
-| --------- | ------- | ----------- |
-| CNN backbone | EfficientNetB0 | Transfer learning base model |
-| Image size | 224×224 | Input resolution |
-| Batch size | 32 | Training batch size |
-| Learning rate | 0.0001 | Initial Adam LR |
-| Fusion weights | CNN 0.6 / Bio 0.4 | Late fusion balance |
-| Urgent threshold | ≥ 0.75 | Risk score for urgent referral |
-| Stage-1 fundus recommendation threshold | 0.55 | Baseline clinical score cutoff to recommend retinal scan |
+## Technology
 
-## Technologies
-
-- **Deep Learning**: TensorFlow / Keras
-- **Machine Learning**: XGBoost, scikit-learn
-- **Image Processing**: OpenCV, Albumentations
-- **API**: FastAPI, Pydantic
-- **Explainability**: Grad-CAM
-- **Reporting**: ReportLab (PDF generation)
-- **Visualization**: Matplotlib, Seaborn
+- **API:** FastAPI, Pydantic, Uvicorn
+- **Web application:** Next.js, React, TypeScript, Tailwind CSS
+- **Modeling:** TensorFlow/Keras, scikit-learn, XGBoost
+- **Image processing:** OpenCV, Pillow, Albumentations
+- **Explainability and reports:** Grad-CAM, ReportLab
 
 ## License
 
-This project is for educational and research purposes.
+No license file is currently included. Contact the repository owner for licensing and reuse terms.
