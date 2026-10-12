@@ -18,6 +18,11 @@ from pathlib import Path
 from contextlib import asynccontextmanager
 from typing import Optional
 
+# On Windows, joblib may probe for physical cores via the removed `wmic`
+# utility. Cap it at the available logical cores to avoid that failing probe.
+if os.name == "nt":
+    os.environ.setdefault("LOKY_MAX_CPU_COUNT", str(os.cpu_count() or 1))
+
 from httpx import request
 import numpy as np
 import joblib

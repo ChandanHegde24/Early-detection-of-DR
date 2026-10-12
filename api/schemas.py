@@ -3,7 +3,7 @@ Pydantic schemas defining the API request/response data formats.
 """
 
 from typing import List, Optional, Dict
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 
@@ -38,6 +38,8 @@ class GradeProbability(BaseModel):
 
 class PredictionResponse(BaseModel):
     """Unified prediction response from the AI system."""
+    model_config = ConfigDict(protected_namespaces=())
+
     predicted_grade: int = Field(..., description="Predicted DR grade (0-4)")
     predicted_label: str = Field(..., description="Human-readable prediction")
     risk_score: float = Field(..., ge=0.0, le=1.0, description="Continuous risk score")
