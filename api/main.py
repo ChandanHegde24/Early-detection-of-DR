@@ -27,7 +27,7 @@ from httpx import request
 import numpy as np
 import joblib
 import cv2
-from PIL import Image, UnidentifiedImageError
+from PIL import Image
 from fastapi import FastAPI, File, UploadFile, Form, HTTPException
 from fastapi.responses import Response
 from fastapi.middleware.cors import CORSMiddleware
@@ -246,12 +246,7 @@ def _extract_biomarkers_from_form(
 
 def _preprocess_image_for_inference(image_bytes: bytes) -> np.ndarray:
     """Apply Stage-2 preprocessing: crop + CLAHE + resize + normalization."""
-    if not image_bytes:
-        raise HTTPException(status_code=400, detail="Uploaded image file is empty.")
-    try:
-        image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-    except (UnidentifiedImageError, OSError) as exc:
-        raise HTTPException(status_code=400, detail=f"Invalid image file: {exc}")
+    image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
     image_np = np.array(image, dtype=np.uint8)
     image_np = crop_to_circle(image_np)
     image_np = apply_clahe(image_np)
