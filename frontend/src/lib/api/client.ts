@@ -42,13 +42,27 @@ export async function predictBiomarker(
   });
 
   if (!res.ok) {
-    let message = "Biomarker prediction failed";
-    try {
-      const payload = await res.json();
-      if (payload?.detail) message = String(payload.detail);
-    } catch {}
-    throw new Error(message);
+  let message = `Biomarker prediction failed (${res.status})`;
+
+  try {
+    const payload = await res.json();
+
+    if (typeof payload?.detail === "string") {
+      message = payload.detail;
+    } else if (payload?.detail) {
+      message = JSON.stringify(payload.detail, null, 2);
+    } else if (payload) {
+      message = JSON.stringify(payload, null, 2);
+    }
+  } catch {
+    const text = await res.text().catch(() => "");
+    if (text) {
+      message = text;
+    }
   }
+
+  throw new Error(message);
+}
 
   return (await res.json()) as PredictionResponse;
 }

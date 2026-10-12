@@ -5,8 +5,7 @@ import json
 from pathlib import Path
 
 API_URL = "http://127.0.0.1:8000/predict/image"
-IMAGE_PATH = r"C:\Users\chandan hegde\Downloads\Early-detection-of-DR\raw_combined\IM003758.JPG"
-# IMAGE_PATH = r"C:\Users\chandan hegde\Downloads\Early-detection-of-DR\raw_combined\raw_combined\1\15_left.jpeg"
+IMAGE_PATH = r"G:\final_pro\Early-detection-of-DR\raw_combined\raw_combined\1\30_left.jpeg"
 
 def test_image_prediction():
     """Test the /predict/image endpoint."""
